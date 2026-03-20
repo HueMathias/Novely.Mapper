@@ -558,8 +558,7 @@ public class NovelyMapper : INovelyMapper
             {
                 valueExpr = InlineLambda(opts.MapFromExpression, sourceExpr);
                 valueExpr = UnwrapObjectConvert(valueExpr);
-                if (valueExpr.Type != targetProp.PropertyType)
-                    valueExpr = Expression.Convert(valueExpr, targetProp.PropertyType);
+                valueExpr = ResolveValueExpression(valueExpr, targetProp.PropertyType);
             }
             else
             {
@@ -622,8 +621,7 @@ public class NovelyMapper : INovelyMapper
             {
                 valueExpr = InlineLambda(opts.MapFromExpression, sourceExpr);
                 valueExpr = UnwrapObjectConvert(valueExpr);
-                if (valueExpr.Type != targetProp.PropertyType)
-                    valueExpr = Expression.Convert(valueExpr, targetProp.PropertyType);
+                valueExpr = ResolveValueExpression(valueExpr, targetProp.PropertyType);
             }
             else
             {
@@ -678,6 +676,31 @@ public class NovelyMapper : INovelyMapper
         // Type assignable
         if (targetProp.PropertyType.IsAssignableFrom(sourceProp.PropertyType))
             return Expression.Convert(Expression.Property(sourceExpr, sourceProp), targetProp.PropertyType);
+
+        // Nullable<T> → T : extraire .GetValueOrDefault()
+        var sourceUnderlying = Nullable.GetUnderlyingType(sourceProp.PropertyType);
+        if (sourceUnderlying != null && sourceUnderlying == targetProp.PropertyType)
+        {
+            var sourceAccess = Expression.Property(sourceExpr, sourceProp);
+            return Expression.Call(sourceAccess,
+                sourceProp.PropertyType.GetMethod("GetValueOrDefault", Type.EmptyTypes)!);
+        }
+
+        // T → Nullable<T> : conversion implicite
+        var targetUnderlying = Nullable.GetUnderlyingType(targetProp.PropertyType);
+        if (targetUnderlying != null && targetUnderlying == sourceProp.PropertyType)
+        {
+            return Expression.Convert(
+                Expression.Property(sourceExpr, sourceProp), targetProp.PropertyType);
+        }
+
+        // Nullable<T> → Nullable<U> ou T → U avec conversion implicite entre les types sous-jacents
+        if (sourceUnderlying != null && targetUnderlying != null
+            && targetUnderlying.IsAssignableFrom(sourceUnderlying))
+        {
+            var sourceAccess = Expression.Property(sourceExpr, sourceProp);
+            return Expression.Convert(sourceAccess, targetProp.PropertyType);
+        }
 
         // Objet imbriqué (types complexes différents avec mapping enregistré)
         if (IsComplexType(sourceProp.PropertyType) && IsComplexType(targetProp.PropertyType)
@@ -795,8 +818,7 @@ public class NovelyMapper : INovelyMapper
                     {
                         argExpr = InlineLambda(opts.MapFromExpression, sourceExpr);
                         argExpr = UnwrapObjectConvert(argExpr);
-                        if (argExpr.Type != parameters[i].ParameterType)
-                            argExpr = Expression.Convert(argExpr, parameters[i].ParameterType);
+                        argExpr = ResolveValueExpression(argExpr, parameters[i].ParameterType);
                     }
                 }
 
@@ -816,10 +838,30 @@ public class NovelyMapper : INovelyMapper
                         .FirstOrDefault(p =>
                             string.Equals(p.Name, paramName, StringComparison.OrdinalIgnoreCase));
 
-                    if (sourceProp != null
-                        && parameters[i].ParameterType.IsAssignableFrom(sourceProp.PropertyType))
+                    if (sourceProp != null)
                     {
-                        argExpr = Expression.Property(sourceExpr, sourceProp);
+                        if (parameters[i].ParameterType.IsAssignableFrom(sourceProp.PropertyType))
+                        {
+                            argExpr = Expression.Property(sourceExpr, sourceProp);
+                        }
+                        else
+                        {
+                            // Nullable<T> → T ou T → Nullable<T>
+                            var srcUnder = Nullable.GetUnderlyingType(sourceProp.PropertyType);
+                            var paramUnder = Nullable.GetUnderlyingType(parameters[i].ParameterType);
+                            if (srcUnder != null && srcUnder == parameters[i].ParameterType)
+                            {
+                                argExpr = Expression.Call(
+                                    Expression.Property(sourceExpr, sourceProp),
+                                    sourceProp.PropertyType.GetMethod("GetValueOrDefault", Type.EmptyTypes)!);
+                            }
+                            else if (paramUnder != null && paramUnder == sourceProp.PropertyType)
+                            {
+                                argExpr = Expression.Convert(
+                                    Expression.Property(sourceExpr, sourceProp),
+                                    parameters[i].ParameterType);
+                            }
+                        }
                     }
                 }
 
@@ -949,6 +991,77 @@ public class NovelyMapper : INovelyMapper
         }
 
         return false;
+    }
+
+    /// <summary>
+    /// Résout une expression de valeur vers le type cible :
+    /// - Si les types sont identiques, retourne tel quel
+    /// - Si un mapping imbriqué est enregistré (types complexes différents), l'applique avec null-check
+    /// - Si une collection avec mapping élémentaire est détectée, applique le mapping de collection
+    /// - Sinon, fait un Expression.Convert classique
+    /// </summary>
+    private Expression ResolveValueExpression(Expression valueExpr, Type targetType)
+    {
+        if (valueExpr.Type == targetType)
+            return valueExpr;
+
+        var sourceType = valueExpr.Type;
+
+        // Mapping imbriqué pour types complexes
+        if (IsComplexType(sourceType) && IsComplexType(targetType)
+            && pendingConfigs.ContainsKey((sourceType, targetType)))
+        {
+            pendingConfigs.TryGetValue((sourceType, targetType), out var nestedConfig);
+            var nestedMapping = BuildMappingExpression(sourceType, targetType, valueExpr, nestedConfig);
+
+            // Null-check pour les types référence
+            if (!sourceType.IsValueType)
+            {
+                return Expression.Condition(
+                    Expression.Equal(valueExpr, Expression.Constant(null, sourceType)),
+                    Expression.Default(targetType),
+                    nestedMapping);
+            }
+
+            return nestedMapping;
+        }
+
+        // Collection de types complexes
+        if (TryGetCollectionElementType(sourceType, out var sourceElem)
+            && TryGetCollectionElementType(targetType, out var targetElem)
+            && sourceElem != targetElem
+            && pendingConfigs.ContainsKey((sourceElem, targetElem)))
+        {
+            var collectionMapping = BuildCollectionMappingExpression(
+                sourceType, sourceElem, targetElem, targetType, valueExpr);
+
+            if (!sourceType.IsValueType)
+            {
+                return Expression.Condition(
+                    Expression.Equal(valueExpr, Expression.Constant(null, sourceType)),
+                    Expression.Default(targetType),
+                    collectionMapping);
+            }
+
+            return collectionMapping;
+        }
+
+        // Nullable<T> → T
+        var srcUnderlying = Nullable.GetUnderlyingType(sourceType);
+        if (srcUnderlying != null && srcUnderlying == targetType)
+        {
+            return Expression.Call(valueExpr,
+                sourceType.GetMethod("GetValueOrDefault", Type.EmptyTypes)!);
+        }
+
+        // T → Nullable<T>
+        var tgtUnderlying = Nullable.GetUnderlyingType(targetType);
+        if (tgtUnderlying != null && tgtUnderlying == sourceType)
+        {
+            return Expression.Convert(valueExpr, targetType);
+        }
+
+        return Expression.Convert(valueExpr, targetType);
     }
 
     internal static Expression InlineLambda(LambdaExpression lambda, Expression argument)

@@ -45,7 +45,8 @@ La solution contient deux projets :
 2. `ForMember(d => d.Prop, opt => opt.MapFrom(s => s.X))` configure les mappings via `MemberOptions`
 3. Au premier appel `Map<S,T>()`, le mapper compile un delegate via Expression Trees et le met en cache
 4. Propriétés matchées par nom ; mappings custom, objets imbriqués et collections de types complexes sont résolus récursivement
-5. En cas d'erreur runtime, le mapper re-exécute propriété par propriété pour identifier la fautive
+5. La résolution de valeur (`ResolveValueExpression`) s'applique uniformément aux expressions `MapFrom` et aux paramètres constructeur : elle cherche d'abord un mapping imbriqué enregistré, puis un mapping de collection, puis les conversions nullable, et enfin un `Expression.Convert` classique
+6. En cas d'erreur runtime, le mapper re-exécute propriété par propriété pour identifier la fautive
 
 ### Mapping automatique des propriétés de navigation (style EF Core)
 
@@ -55,6 +56,24 @@ Le mapper résout automatiquement les propriétés de navigation imbriquées san
 - **Collection imbriquée** : si `Source.Items` est `ICollection<A>` et `Target.Items` est `IEnumerable<B>`, `List<B>`, `ICollection<B>` ou `B[]`, et que `CreateMap<A, B>()` est enregistré, le mapper génère un `.Select(x => map(x)).ToList()` ou `.ToArray()` automatiquement
 - **Imbrication profonde** : ces résolutions sont récursives (ex: `Order.Customer.Contacts` fonctionne si chaque niveau a son mapping enregistré)
 - **Null-safety** : les propriétés de navigation null retournent `null` (pas d'exception)
+
+### Conversion automatique des types nullable
+
+Le mapper gère automatiquement les conversions entre types nullable et non-nullable en convention (propriétés de même nom) et dans les constructeurs paramétrés (records) :
+
+- **`T?` → `T`** : utilise `.GetValueOrDefault()` — retourne `default(T)` si la source est `null` (ex: `int?` → `int` donne `0`)
+- **`T` → `T?`** : conversion implicite via `Expression.Convert`
+- **`Nullable<T>` → `Nullable<U>`** : conversion quand les types sous-jacents sont compatibles (ex: `int?` → `long?`)
+- Fonctionne pour les classes (propriétés settables), les records (constructeurs paramétrés) et `Map(source, target)`
+
+### Résolution automatique dans `MapFrom`
+
+`ForMember(d => d.Prop, opt => opt.MapFrom(s => s.X))` résout automatiquement les types via `ResolveValueExpression` quand le type retourné par l'expression diffère du type cible :
+
+- **Mapping imbriqué** : si `MapFrom` retourne un type `A` et que la propriété cible est de type `B`, et qu'un `CreateMap<A, B>()` est enregistré, le mapping est appliqué automatiquement (avec null-check). Plus besoin de `ConvertUsing` explicite
+- **Collection imbriquée** : même résolution automatique pour les collections (ex: `MapFrom(s => s.Items)` où `Items` est `List<A>` et la cible est `List<B>`)
+- **Conversion nullable** : `MapFrom(s => s.NullableValue)` vers une propriété non-nullable est géré automatiquement
+- Cette résolution s'applique aussi aux paramètres de constructeur (records avec `MapFrom`)
 
 ### Injection de dépendances
 
