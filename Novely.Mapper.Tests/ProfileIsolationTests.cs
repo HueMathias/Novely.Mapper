@@ -63,7 +63,7 @@ public class ProfileIsolationTests
         Assert.That(b.Number, Is.EqualTo(42));
 
         // mapper1 NE gère PAS SourceB → TargetB
-        Assert.Throws<InvalidOperationException>(
+        Assert.Throws<NovelyMapperException>(
             () => mapper1.Map<SourceB, TargetB>(new SourceB { Number = 1 }));
 
         provider1.Dispose();
@@ -85,12 +85,12 @@ public class ProfileIsolationTests
 
         // mapper1 gère SourceA → TargetA mais PAS SourceB → TargetB
         Assert.DoesNotThrow(() => mapper1.Map<SourceA, TargetA>(new SourceA { Value = "ok" }));
-        Assert.Throws<InvalidOperationException>(
+        Assert.Throws<NovelyMapperException>(
             () => mapper1.Map<SourceB, TargetB>(new SourceB { Number = 1 }));
 
         // mapper2 gère SourceB → TargetB mais PAS SourceA → TargetA
         Assert.DoesNotThrow(() => mapper2.Map<SourceB, TargetB>(new SourceB { Number = 42 }));
-        Assert.Throws<InvalidOperationException>(
+        Assert.Throws<NovelyMapperException>(
             () => mapper2.Map<SourceA, TargetA>(new SourceA { Value = "fail" }));
     }
 }

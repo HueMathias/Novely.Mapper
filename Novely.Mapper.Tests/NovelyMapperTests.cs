@@ -72,10 +72,14 @@ public class NovelyMapperTests
     }
 
     [Test]
-    public void Map_WithoutCreateMap_ShouldThrowInvalidOperationException()
+    public void Map_WithoutCreateMap_ShouldThrowWithSuggestion()
     {
         var mapper = new NovelyMapper();
         var a = new EntityA { Id = 1, Name = "Test" };
-        Assert.Throws<InvalidOperationException>(() => mapper.Map<EntityA, EntityB>(a));
+        var ex = Assert.Throws<NovelyMapperException>(() => mapper.Map<EntityA, EntityB>(a));
+        Assert.That(ex!.Message, Does.Contain("CreateMap"));
+        Assert.That(ex.Message, Does.Contain("EntityA"));
+        Assert.That(ex.Message, Does.Contain("EntityB"));
+        Assert.That(ex.Suggestion, Does.Contain("CreateMap"));
     }
 }

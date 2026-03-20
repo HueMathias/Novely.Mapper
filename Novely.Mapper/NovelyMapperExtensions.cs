@@ -15,7 +15,7 @@ public static class ServiceCollectionExtensions
         services.AddSingleton<INovelyMapper>(mapper);
         services.AddSingleton(mapper);
 
-        Activator.CreateInstance(typeof(TProfile), mapper);
+        InstantiateProfile(typeof(TProfile), mapper);
 
         return services;
     }
@@ -34,7 +34,7 @@ public static class ServiceCollectionExtensions
         services.AddSingleton<INovelyMapper>(mapper);
         services.AddSingleton(mapper);
 
-        Activator.CreateInstance(typeof(TProfile), mapper);
+        InstantiateProfile(typeof(TProfile), mapper);
 
         return services;
     }
@@ -59,12 +59,19 @@ public static class ServiceCollectionExtensions
         foreach (var profileType in profileTypes)
         {
             if (!typeof(NovelyMapperProfile).IsAssignableFrom(profileType))
-                throw new ArgumentException($"{profileType.Name} ne dérive pas de NovelyMapperProfile.");
+                throw new NovelyMapperException(
+                    $"Le type '{profileType.Name}' ne dérive pas de NovelyMapperProfile.",
+                    null, null, null,
+                    $"Le type passé à UseNovelyMapper doit hériter de NovelyMapperProfile. " +
+                    $"Vérifiez que '{profileType.Name}' hérite bien de NovelyMapperProfile.");
 
             if (profileType.IsAbstract)
-                throw new ArgumentException($"{profileType.Name} est abstrait et ne peut pas être instancié.");
+                throw new NovelyMapperException(
+                    $"Le type '{profileType.Name}' est abstrait et ne peut pas être instancié.",
+                    null, null, null,
+                    $"Passez un type concret (non-abstrait) à UseNovelyMapper.");
 
-            Activator.CreateInstance(profileType, mapper);
+            InstantiateProfile(profileType, mapper);
         }
 
         return services;
@@ -80,16 +87,38 @@ public static class ServiceCollectionExtensions
         services.AddSingleton(mapper);
 
         var profileTypes = assemblies
-            .SelectMany(a => a.GetTypes())
+            .SelectMany(a => a.GetExportedTypes())
             .Where(t => typeof(NovelyMapperProfile).IsAssignableFrom(t)
                         && !t.IsAbstract
                         && t != typeof(NovelyMapperEmptyProfile));
 
         foreach (var profileType in profileTypes)
         {
-            Activator.CreateInstance(profileType, mapper);
+            InstantiateProfile(profileType, mapper);
         }
 
         return services;
+    }
+
+    private static void InstantiateProfile(Type profileType, NovelyMapper mapper)
+    {
+        try
+        {
+            Activator.CreateInstance(profileType, mapper);
+        }
+        catch (MissingMethodException ex)
+        {
+            throw NovelyMapperException.ProfileInstantiationFailed(profileType, ex);
+        }
+        catch (TargetInvocationException ex) when (ex.InnerException != null)
+        {
+            // Le constructeur du profil a levé une exception → propager avec contexte
+            throw new NovelyMapperException(
+                $"Le constructeur du profil '{profileType.Name}' a levé une exception.",
+                null, null, null,
+                $"Vérifiez le code dans le constructeur de '{profileType.Name}'. " +
+                $"L'erreur d'origine est : {ex.InnerException.Message}",
+                ex.InnerException);
+        }
     }
 }

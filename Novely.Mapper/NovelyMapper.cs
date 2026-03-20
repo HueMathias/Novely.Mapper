@@ -64,27 +64,69 @@ public class NovelyMapper : INovelyMapper
 
         var key = (typeof(TSource), typeof(TTarget));
         if (!pendingConfigs.TryGetValue(key, out var configObj))
-            throw new InvalidOperationException(
-                $"Aucune configuration trouvée pour {typeof(TSource).Name} → {typeof(TTarget).Name}");
+            throw NovelyMapperException.MissingMapping(typeof(TSource), typeof(TTarget));
 
         var config = (NovelyMapperConfig<TSource, TTarget>)configObj;
 
+        // ConvertUsing
         if (config.CustomConverter != null)
-            return config.CustomConverter(source);
+        {
+            try
+            {
+                return config.CustomConverter(source);
+            }
+            catch (Exception ex) when (ex is not NovelyMapperException)
+            {
+                throw NovelyMapperException.RuntimeMappingFailed(
+                    typeof(TSource), typeof(TTarget), "ConvertUsing", ex);
+            }
+        }
 
+        // BeforeMap → update mapping
         if (config.BeforeMapAction != null)
         {
             var target = CreateInstance<TTarget>();
-            config.BeforeMapAction(source, target);
+
+            try
+            {
+                config.BeforeMapAction(source, target);
+            }
+            catch (Exception ex) when (ex is not NovelyMapperException)
+            {
+                throw NovelyMapperException.RuntimeMappingFailed(
+                    typeof(TSource), typeof(TTarget), "BeforeMap", ex);
+            }
+
             var updateFunc = GetOrCompileUpdateMapping<TSource, TTarget>();
-            updateFunc(source, target);
-            config.AfterMapAction?.Invoke(source, target);
+
+            try
+            {
+                updateFunc(source, target);
+            }
+            catch (Exception ex) when (ex is not NovelyMapperException)
+            {
+                throw DiagnoseRuntimeError(source, target, ex);
+            }
+
+            InvokeAfterMap(config, source, target);
             return target;
         }
 
+        // Standard path
         var func = GetOrCompileMapping<TSource, TTarget>();
-        var result = func(source);
-        config.AfterMapAction?.Invoke(source, result);
+
+        TTarget result;
+        try
+        {
+            result = func(source);
+        }
+        catch (Exception ex) when (ex is not NovelyMapperException)
+        {
+            // Re-exécuter propriété par propriété pour identifier la fautive
+            throw DiagnoseRuntimeError<TSource, TTarget>(source, ex);
+        }
+
+        InvokeAfterMap(config, source, result);
         return result;
     }
 
@@ -95,15 +137,35 @@ public class NovelyMapper : INovelyMapper
 
         var key = (typeof(TSource), typeof(TTarget));
         if (!pendingConfigs.TryGetValue(key, out var configObj))
-            throw new InvalidOperationException(
-                $"Aucune configuration trouvée pour {typeof(TSource).Name} → {typeof(TTarget).Name}");
+            throw NovelyMapperException.MissingMapping(typeof(TSource), typeof(TTarget));
 
         var config = (NovelyMapperConfig<TSource, TTarget>)configObj;
 
-        config.BeforeMapAction?.Invoke(source, target);
+        if (config.BeforeMapAction != null)
+        {
+            try
+            {
+                config.BeforeMapAction(source, target);
+            }
+            catch (Exception ex) when (ex is not NovelyMapperException)
+            {
+                throw NovelyMapperException.RuntimeMappingFailed(
+                    typeof(TSource), typeof(TTarget), "BeforeMap", ex);
+            }
+        }
+
         var updateFunc = GetOrCompileUpdateMapping<TSource, TTarget>();
-        updateFunc(source, target);
-        config.AfterMapAction?.Invoke(source, target);
+
+        try
+        {
+            updateFunc(source, target);
+        }
+        catch (Exception ex) when (ex is not NovelyMapperException)
+        {
+            throw DiagnoseRuntimeError(source, target, ex);
+        }
+
+        InvokeAfterMap(config, source, target);
         return target;
     }
 
@@ -113,22 +175,54 @@ public class NovelyMapper : INovelyMapper
 
         var key = (typeof(TSource), typeof(TTarget));
         if (!pendingConfigs.ContainsKey(key))
-            throw new InvalidOperationException(
-                $"Aucune configuration trouvée pour {typeof(TSource).Name} → {typeof(TTarget).Name}");
+            throw NovelyMapperException.MissingMapping(typeof(TSource), typeof(TTarget));
 
-        return sources.Select(item => Map<TSource, TTarget>(item));
+        return MapIterator<TSource, TTarget>(sources);
+    }
+
+    private IEnumerable<TTarget> MapIterator<TSource, TTarget>(IEnumerable<TSource> sources)
+    {
+        int index = 0;
+        foreach (var item in sources)
+        {
+            TTarget result;
+            try
+            {
+                result = Map<TSource, TTarget>(item);
+            }
+            catch (NovelyMapperException ex)
+            {
+                throw NovelyMapperException.CollectionItemMappingFailed(
+                    typeof(TSource), typeof(TTarget), index, ex);
+            }
+            catch (Exception ex)
+            {
+                throw NovelyMapperException.CollectionItemMappingFailed(
+                    typeof(TSource), typeof(TTarget), index, ex);
+            }
+
+            yield return result;
+            index++;
+        }
     }
 
     public Expression<Func<TSource, TTarget>> GetProjectionExpression<TSource, TTarget>()
     {
         var key = (typeof(TSource), typeof(TTarget));
         if (!pendingConfigs.TryGetValue(key, out var configObj))
-            throw new InvalidOperationException(
-                $"Aucune configuration trouvée pour {typeof(TSource).Name} → {typeof(TTarget).Name}");
+            throw NovelyMapperException.MissingMapping(typeof(TSource), typeof(TTarget));
 
-        var param = Expression.Parameter(typeof(TSource), "src");
-        var body = BuildMappingExpression(typeof(TSource), typeof(TTarget), param, configObj);
-        return Expression.Lambda<Func<TSource, TTarget>>(body, param);
+        try
+        {
+            var param = Expression.Parameter(typeof(TSource), "src");
+            var body = BuildMappingExpression(typeof(TSource), typeof(TTarget), param, configObj);
+            return Expression.Lambda<Func<TSource, TTarget>>(body, param);
+        }
+        catch (Exception ex) when (ex is not NovelyMapperException)
+        {
+            throw NovelyMapperException.MappingCompilationFailed(
+                typeof(TSource), typeof(TTarget), null, ex);
+        }
     }
 
     public void AssertConfigurationIsValid()
@@ -146,6 +240,137 @@ public class NovelyMapper : INovelyMapper
             throw new NovelyMapperValidationException(errors);
     }
 
+    #region Runtime Error Diagnosis
+
+    /// <summary>
+    /// Lorsqu'un delegate compilé échoue au runtime, re-exécute le mapping propriété
+    /// par propriété pour identifier exactement laquelle a causé l'erreur.
+    /// </summary>
+    private NovelyMapperException DiagnoseRuntimeError<TSource, TTarget>(
+        TSource source, Exception originalException)
+    {
+        var key = (typeof(TSource), typeof(TTarget));
+        if (!pendingConfigs.TryGetValue(key, out var configObj))
+            return NovelyMapperException.RuntimeMappingFailed(
+                typeof(TSource), typeof(TTarget), "mapping des propriétés", originalException);
+
+        var config = (IMapperConfig)configObj;
+        var memberConfigs = config.GetMemberConfigs();
+        var customMappings = config.GetCustomMappings();
+
+        foreach (var prop in typeof(TTarget).GetProperties(BindingFlags.Public | BindingFlags.Instance)
+                     .Where(p => p.CanWrite))
+        {
+            try
+            {
+                // Tenter de compiler et exécuter le binding pour cette propriété seule
+                var param = Expression.Parameter(typeof(TSource), "src");
+                var binding = BuildMemberBinding(
+                    typeof(TSource), typeof(TTarget), prop, param,
+                    memberConfigs, customMappings);
+
+                if (binding == null) continue;
+
+                // Compiler un mini-lambda qui évalue juste cette propriété
+                var memberInit = Expression.MemberInit(
+                    BuildConstructorExpression(
+                        typeof(TSource), typeof(TTarget), param,
+                        memberConfigs, customMappings).Item1,
+                    binding);
+                var lambda = Expression.Lambda(memberInit, param);
+                var compiled = lambda.Compile();
+                compiled.DynamicInvoke(source);
+            }
+            catch (TargetInvocationException ex) when (ex.InnerException != null)
+            {
+                return NovelyMapperException.PropertyMappingFailed(
+                    typeof(TSource), typeof(TTarget), prop.Name, ex.InnerException);
+            }
+            catch (Exception ex) when (ex is not NovelyMapperException)
+            {
+                return NovelyMapperException.PropertyMappingFailed(
+                    typeof(TSource), typeof(TTarget), prop.Name, ex);
+            }
+        }
+
+        // Si on n'a pas trouvé la propriété fautive, retourner l'erreur originale avec contexte
+        return NovelyMapperException.RuntimeMappingFailed(
+            typeof(TSource), typeof(TTarget), "mapping des propriétés", originalException);
+    }
+
+    /// <summary>
+    /// Variante pour le mapping vers un objet existant (update mapping).
+    /// Re-exécute propriété par propriété pour identifier l'erreur.
+    /// </summary>
+    private NovelyMapperException DiagnoseRuntimeError<TSource, TTarget>(
+        TSource source, TTarget target, Exception originalException)
+    {
+        var key = (typeof(TSource), typeof(TTarget));
+        if (!pendingConfigs.TryGetValue(key, out var configObj))
+            return NovelyMapperException.RuntimeMappingFailed(
+                typeof(TSource), typeof(TTarget), "mapping des propriétés", originalException);
+
+        var config = (IMapperConfig)configObj;
+        var memberConfigs = config.GetMemberConfigs();
+        var customMappings = config.GetCustomMappings();
+
+        foreach (var prop in typeof(TTarget).GetProperties(BindingFlags.Public | BindingFlags.Instance)
+                     .Where(p => p.CanWrite))
+        {
+            try
+            {
+                var sourceParam = Expression.Parameter(typeof(TSource), "src");
+                var targetParam = Expression.Parameter(typeof(TTarget), "dest");
+
+                var assignment = BuildPropertyAssignment(
+                    typeof(TSource), typeof(TTarget), prop,
+                    sourceParam, targetParam,
+                    memberConfigs, customMappings);
+
+                if (assignment == null) continue;
+
+                var block = Expression.Block(assignment);
+                var lambda = Expression.Lambda(block, sourceParam, targetParam);
+                var compiled = lambda.Compile();
+                compiled.DynamicInvoke(source, target);
+            }
+            catch (TargetInvocationException ex) when (ex.InnerException != null)
+            {
+                return NovelyMapperException.PropertyMappingFailed(
+                    typeof(TSource), typeof(TTarget), prop.Name, ex.InnerException);
+            }
+            catch (Exception ex) when (ex is not NovelyMapperException)
+            {
+                return NovelyMapperException.PropertyMappingFailed(
+                    typeof(TSource), typeof(TTarget), prop.Name, ex);
+            }
+        }
+
+        return NovelyMapperException.RuntimeMappingFailed(
+            typeof(TSource), typeof(TTarget), "mapping des propriétés", originalException);
+    }
+
+    #endregion
+
+    #region Private helpers
+
+    private static void InvokeAfterMap<TSource, TTarget>(
+        NovelyMapperConfig<TSource, TTarget> config, TSource source, TTarget target)
+    {
+        if (config.AfterMapAction == null) return;
+        try
+        {
+            config.AfterMapAction(source, target);
+        }
+        catch (Exception ex) when (ex is not NovelyMapperException)
+        {
+            throw NovelyMapperException.RuntimeMappingFailed(
+                typeof(TSource), typeof(TTarget), "AfterMap", ex);
+        }
+    }
+
+    #endregion
+
     #region Compilation
 
     private Func<TSource, TTarget> GetOrCompileMapping<TSource, TTarget>()
@@ -155,14 +380,21 @@ public class NovelyMapper : INovelyMapper
         if (!compiledMappings.TryGetValue(key, out var del))
         {
             if (!pendingConfigs.TryGetValue(key, out var pending))
-                throw new InvalidOperationException(
-                    $"Aucune configuration trouvée pour {typeof(TSource).Name} → {typeof(TTarget).Name}");
+                throw NovelyMapperException.MissingMapping(typeof(TSource), typeof(TTarget));
 
-            var param = Expression.Parameter(typeof(TSource), "src");
-            var body = BuildMappingExpression(typeof(TSource), typeof(TTarget), param, pending);
-            var lambda = Expression.Lambda<Func<TSource, TTarget>>(body, param);
-            del = lambda.Compile();
-            compiledMappings[key] = del;
+            try
+            {
+                var param = Expression.Parameter(typeof(TSource), "src");
+                var body = BuildMappingExpression(typeof(TSource), typeof(TTarget), param, pending);
+                var lambda = Expression.Lambda<Func<TSource, TTarget>>(body, param);
+                del = lambda.Compile();
+                compiledMappings[key] = del;
+            }
+            catch (Exception ex) when (ex is not NovelyMapperException)
+            {
+                throw NovelyMapperException.MappingCompilationFailed(
+                    typeof(TSource), typeof(TTarget), null, ex);
+            }
         }
 
         return (Func<TSource, TTarget>)del;
@@ -175,8 +407,17 @@ public class NovelyMapper : INovelyMapper
         if (!compiledUpdateMappings.TryGetValue(key, out var del))
         {
             pendingConfigs.TryGetValue(key, out var configObj);
-            del = CompileUpdateMapping<TSource, TTarget>(configObj);
-            compiledUpdateMappings[key] = del;
+
+            try
+            {
+                del = CompileUpdateMapping<TSource, TTarget>(configObj);
+                compiledUpdateMappings[key] = del;
+            }
+            catch (Exception ex) when (ex is not NovelyMapperException)
+            {
+                throw NovelyMapperException.MappingCompilationFailed(
+                    typeof(TSource), typeof(TTarget), null, ex);
+            }
         }
 
         return (Action<TSource, TTarget>)del;
@@ -195,12 +436,20 @@ public class NovelyMapper : INovelyMapper
         foreach (var prop in typeof(TTarget).GetProperties(BindingFlags.Public | BindingFlags.Instance)
                      .Where(p => p.CanWrite))
         {
-            var assignment = BuildPropertyAssignment(
-                typeof(TSource), typeof(TTarget), prop,
-                sourceParam, targetParam,
-                memberConfigs, customMappings);
-            if (assignment != null)
-                assignments.Add(assignment);
+            try
+            {
+                var assignment = BuildPropertyAssignment(
+                    typeof(TSource), typeof(TTarget), prop,
+                    sourceParam, targetParam,
+                    memberConfigs, customMappings);
+                if (assignment != null)
+                    assignments.Add(assignment);
+            }
+            catch (Exception ex) when (ex is not NovelyMapperException)
+            {
+                throw NovelyMapperException.MappingCompilationFailed(
+                    typeof(TSource), typeof(TTarget), prop.Name, ex);
+            }
         }
 
         if (assignments.Count == 0)
@@ -238,11 +487,19 @@ public class NovelyMapper : INovelyMapper
         {
             if (ctorMatchedProps.Contains(prop.Name)) continue;
 
-            var binding = BuildMemberBinding(
-                sourceType, targetType, prop, sourceExpr,
-                memberConfigs, customMappings);
-            if (binding != null)
-                bindings.Add(binding);
+            try
+            {
+                var binding = BuildMemberBinding(
+                    sourceType, targetType, prop, sourceExpr,
+                    memberConfigs, customMappings);
+                if (binding != null)
+                    bindings.Add(binding);
+            }
+            catch (Exception ex) when (ex is not NovelyMapperException)
+            {
+                throw NovelyMapperException.MappingCompilationFailed(
+                    sourceType, targetType, prop.Name, ex);
+            }
         }
 
         return Expression.MemberInit(newExpr, bindings);
@@ -303,7 +560,7 @@ public class NovelyMapper : INovelyMapper
         }
         else
         {
-            valueExpr = BuildConventionBasedExpression(sourceType, targetProp, sourceExpr);
+            valueExpr = BuildConventionBasedExpression(sourceType, targetType, targetProp, sourceExpr);
         }
 
         if (valueExpr == null) return null;
@@ -368,7 +625,7 @@ public class NovelyMapper : INovelyMapper
         }
         else
         {
-            valueExpr = BuildConventionBasedExpression(sourceType, targetProp, sourceExpr);
+            valueExpr = BuildConventionBasedExpression(sourceType, targetType, targetProp, sourceExpr);
         }
 
         if (valueExpr == null) return null;
@@ -377,7 +634,7 @@ public class NovelyMapper : INovelyMapper
     }
 
     private Expression? BuildConventionBasedExpression(
-        Type sourceType, PropertyInfo targetProp, Expression sourceExpr)
+        Type sourceType, Type targetType, PropertyInfo targetProp, Expression sourceExpr)
     {
         var sourceProp = sourceType.GetProperty(targetProp.Name, BindingFlags.Public | BindingFlags.Instance);
         if (sourceProp == null) return null;
@@ -434,6 +691,14 @@ public class NovelyMapper : INovelyMapper
             return collectionMapping;
         }
 
+        // Types incompatibles avec même nom : signaler via MissingPropertyBehavior
+        if (Options.MissingPropertyBehavior == MissingPropertyBehavior.Throw)
+        {
+            throw NovelyMapperException.TypeMismatch(
+                sourceType, targetType, targetProp.Name,
+                sourceProp.PropertyType, targetProp.PropertyType);
+        }
+
         return null;
     }
 
@@ -455,12 +720,24 @@ public class NovelyMapper : INovelyMapper
         // Chercher le meilleur constructeur paramétré
         var ctors = targetType.GetConstructors(BindingFlags.Public | BindingFlags.Instance);
 
+        if (ctors.Length == 0)
+        {
+            throw new NovelyMapperException(
+                $"Le type '{NovelyMapperException.FormatTypeName(targetType)}' n'a aucun constructeur public.",
+                sourceType, targetType, null,
+                "Ajoutez un constructeur public au type cible, ou utilisez ConvertUsing pour un mapping entièrement personnalisé.");
+        }
+
+        // Collecter les paramètres non résolus de chaque constructeur pour un meilleur message d'erreur
+        var bestUnmatchedParams = new List<string>();
+
         foreach (var ctor in ctors.OrderByDescending(c => c.GetParameters().Length))
         {
             var parameters = ctor.GetParameters();
             var args = new Expression[parameters.Length];
             var matched = true;
             var matchedProps = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            var unmatchedForThisCtor = new List<string>();
 
             for (int i = 0; i < parameters.Length; i++)
             {
@@ -532,21 +809,26 @@ public class NovelyMapper : INovelyMapper
                 if (argExpr == null)
                 {
                     matched = false;
-                    break;
+                    unmatchedForThisCtor.Add(
+                        $"'{paramName}' ({NovelyMapperException.FormatTypeName(parameters[i].ParameterType)})");
                 }
-
-                args[i] = argExpr;
-                if (targetProp != null) matchedProps.Add(targetProp.Name);
+                else
+                {
+                    args[i] = argExpr;
+                    if (targetProp != null) matchedProps.Add(targetProp.Name);
+                }
             }
 
             if (matched)
                 return (Expression.New(ctor, args), matchedProps);
+
+            // Garder les paramètres non résolus du constructeur avec le moins de manques
+            if (bestUnmatchedParams.Count == 0 || unmatchedForThisCtor.Count < bestUnmatchedParams.Count)
+                bestUnmatchedParams = unmatchedForThisCtor;
         }
 
-        throw new InvalidOperationException(
-            $"Aucun constructeur approprié trouvé pour {targetType.Name}. " +
-            $"Le type doit avoir soit un constructeur sans paramètre, " +
-            $"soit un constructeur dont les paramètres correspondent aux propriétés source.");
+        throw NovelyMapperException.ConstructorResolutionFailed(
+            sourceType, targetType, bestUnmatchedParams);
     }
 
     #endregion
@@ -596,9 +878,7 @@ public class NovelyMapper : INovelyMapper
         if (defaultCtor != null)
             return (T)defaultCtor.Invoke(null);
 
-        throw new InvalidOperationException(
-            $"Impossible de créer une instance de {typeof(T).Name}. " +
-            $"BeforeMap et Map vers existant nécessitent un constructeur sans paramètre.");
+        throw NovelyMapperException.BeforeMapRequiresParameterlessCtor(typeof(T));
     }
 
     private static bool IsComplexType(Type type)

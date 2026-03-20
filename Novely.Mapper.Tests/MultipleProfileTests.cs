@@ -78,10 +78,12 @@ public class MultipleProfileTests
     }
 
     [Test]
-    public void UseNovelyMapper_WithInvalidType_ShouldThrow()
+    public void UseNovelyMapper_WithInvalidType_ShouldThrowWithSuggestion()
     {
         var services = new ServiceCollection();
-        Assert.Throws<ArgumentException>(
+        var ex = Assert.Throws<NovelyMapperException>(
             () => services.UseNovelyMapper(typeof(string)));
+        Assert.That(ex!.Message, Does.Contain("String"));
+        Assert.That(ex.Message, Does.Contain("NovelyMapperProfile"));
     }
 }

@@ -108,7 +108,7 @@ public class ProjectToTests
 
         var list = new List<Source> { new() { Id = 1, Name = "x" } };
 
-        Assert.Throws<InvalidOperationException>(
+        Assert.Throws<NovelyMapperException>(
             () => list.AsQueryable().ProjectTo<Source, Target>(mapper).ToList());
     }
 }

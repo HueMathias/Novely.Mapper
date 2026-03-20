@@ -151,8 +151,19 @@ public class NovelyMapperConfig<TSource, TTarget> : INovelyMapperConfig<TSource,
             if (sourceProp == null)
             {
                 errors.Add(
+                    $"{sourceType.Name} → {targetType.Name} : la propriété '{prop.Name}' ({prop.PropertyType.Name}) " +
+                    $"de {targetType.Name} n'a pas de propriété source correspondante. " +
+                    $"Configurez .ForMember(d => d.{prop.Name}, opt => opt.MapFrom(...)) " +
+                    $"ou .ForMember(d => d.{prop.Name}, opt => opt.Ignore()).");
+            }
+            else if (!prop.PropertyType.IsAssignableFrom(sourceProp.PropertyType)
+                     && !hasMappingFor(sourceProp.PropertyType, prop.PropertyType))
+            {
+                errors.Add(
                     $"{sourceType.Name} → {targetType.Name} : la propriété '{prop.Name}' " +
-                    $"de {targetType.Name} n'a pas de propriété source correspondante.");
+                    $"a un type incompatible (source: {sourceProp.PropertyType.Name}, cible: {prop.PropertyType.Name}). " +
+                    $"Configurez .ForMember(d => d.{prop.Name}, opt => opt.MapFrom(...)) " +
+                    $"ou enregistrez CreateMap<{sourceProp.PropertyType.Name}, {prop.PropertyType.Name}>().");
             }
         }
 
@@ -186,6 +197,20 @@ public class NovelyMapperConfig<TSource, TTarget> : INovelyMapperConfig<TSource,
         var targetName = ExtractMemberName(targetSelector);
         var opts = new MemberOptions<TSource>();
         memberOptions(opts);
+
+        // Validation NullSubstitute : vérifier la compatibilité de type
+        if (opts._hasNullSubstitute && opts._nullSubstituteValue != null)
+        {
+            var targetProp = typeof(TTarget).GetProperty(targetName,
+                BindingFlags.Public | BindingFlags.Instance);
+            if (targetProp != null && !targetProp.PropertyType.IsInstanceOfType(opts._nullSubstituteValue))
+            {
+                throw NovelyMapperException.NullSubstituteTypeMismatch(
+                    typeof(TTarget), targetName,
+                    targetProp.PropertyType, opts._nullSubstituteValue.GetType());
+            }
+        }
+
         MemberConfigs[targetName] = opts;
         return this;
     }
@@ -260,7 +285,7 @@ public class NovelyMapperConfig<TSource, TTarget> : INovelyMapperConfig<TSource,
         {
             MemberExpression m => m.Member.Name,
             UnaryExpression u when u.Operand is MemberExpression m => m.Member.Name,
-            _ => throw new ArgumentException("L'expression cible doit être une propriété.")
+            _ => throw NovelyMapperException.InvalidTargetSelector(typeof(TTarget), selector.Body)
         };
     }
 
