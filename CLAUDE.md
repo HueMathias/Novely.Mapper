@@ -28,7 +28,7 @@ La solution contient deux projets :
 
 | Fichier | Rôle |
 |---|---|
-| `NovelyMapper.cs` | Interface `INovelyMapper` et implémentation. Méthodes : `CreateMap`, `Map` (single/existing/collection), `GetProjectionExpression`, `AssertConfigurationIsValid`. Compilation lazy via Expression Trees, diagnostic runtime par propriété en cas d'erreur |
+| `NovelyMapper.cs` | Interface `IMapper` (interface DI principale), `INovelyMapper` (hérite de `IMapper`, rétrocompatibilité) et implémentation `NovelyMapper`. Méthodes : `CreateMap`, `Map` (single/existing/collection), `GetProjectionExpression`, `AssertConfigurationIsValid`. Compilation lazy via Expression Trees, diagnostic runtime par propriété en cas d'erreur |
 | `NovelyMapperConfig.cs` | Interface `INovelyMapperConfig<S,T>` et implémentation. API fluent : `ForMember` (MemberOptions), `ReverseMap`, `BeforeMap`, `AfterMap`, `ConvertUsing`. Implémente `IMapperConfig` (interface interne non-générique pour la validation) |
 | `MemberOptions.cs` | Options par membre : `MapFrom`, `Ignore`, `MapWhen`, `NullSubstitute`, `ConvertUsing`. Implémente `IMemberOptions` (interface interne) |
 | `NovelyMapperProfile.cs` | Classe abstraite instance-based. Le profil reçoit `NovelyMapper` via constructeur (pas de static) |
@@ -36,7 +36,7 @@ La solution contient deux projets :
 | `NovelyMapperExtensions.cs` | Extensions DI : `UseNovelyMapper<T>()`, multi-profils par types ou scan d'assembly (`GetExportedTypes` pour exclure les non-publics) |
 | `NovelyMapperException.cs` | Exception dédiée avec propriétés structurées (`SourceType`, `TargetType`, `PropertyName`, `CollectionIndex`, `Suggestion`). Factory methods pour chaque scénario d'erreur |
 | `NovelyMapperValidationException.cs` | Hérite de `NovelyMapperException`. Levée par `AssertConfigurationIsValid()` avec liste d'erreurs formatées |
-| `QueryableExtensions.cs` | `ProjectTo<T>()` pour IQueryable (projection EF via expression) |
+| `QueryableExtensions.cs` | `ProjectTo<T>()` pour IQueryable (projection EF via expression). Accepte `IMapper` en paramètre |
 | `NovelyMapperOptions.cs` | Options globales : `MissingPropertyBehavior` (Silent/Throw) |
 
 ### Flux de mapping
@@ -49,7 +49,7 @@ La solution contient deux projets :
 
 ### Injection de dépendances
 
-`UseNovelyMapper<TProfile>()` crée un `NovelyMapper`, l'enregistre en singleton, puis instancie le profil via `Activator.CreateInstance(typeof(TProfile), mapper)`. Multi-profils : `UseNovelyMapper(params Type[])` ou `UseNovelyMapper(params Assembly[])`.
+`UseNovelyMapper<TProfile>()` crée un `NovelyMapper`, l'enregistre en singleton sous `IMapper`, `INovelyMapper` et `NovelyMapper`, puis instancie le profil via `Activator.CreateInstance(typeof(TProfile), mapper)`. L'interface `IMapper` est l'interface principale pour l'injection. `INovelyMapper` hérite de `IMapper` et reste disponible pour rétrocompatibilité. Multi-profils : `UseNovelyMapper(params Type[])` ou `UseNovelyMapper(params Assembly[])`.
 
 ## Gestion d'erreurs
 

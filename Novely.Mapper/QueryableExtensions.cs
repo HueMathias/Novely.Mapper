@@ -8,7 +8,7 @@ public static class QueryableExtensions
     /// <summary>
     /// Projette un IQueryable&lt;TSource&gt; vers un IQueryable&lt;TTarget&gt; en utilisant l'expression de mapping.
     /// </summary>
-    public static IQueryable<TTarget> ProjectTo<TSource, TTarget>(this IQueryable<TSource> source, INovelyMapper mapper)
+    public static IQueryable<TTarget> ProjectTo<TSource, TTarget>(this IQueryable<TSource> source, IMapper mapper)
     {
         var projection = mapper.GetProjectionExpression<TSource, TTarget>();
         return source.Select(projection);
@@ -17,10 +17,10 @@ public static class QueryableExtensions
     /// <summary>
     /// Projette un IQueryable non-générique vers un IQueryable&lt;TTarget&gt; en utilisant l'expression de mapping.
     /// </summary>
-    public static IQueryable<TTarget> ProjectTo<TTarget>(this IQueryable source, INovelyMapper mapper)
+    public static IQueryable<TTarget> ProjectTo<TTarget>(this IQueryable source, IMapper mapper)
     {
         var sourceType = source.ElementType;
-        var method = typeof(INovelyMapper).GetMethod(nameof(INovelyMapper.GetProjectionExpression))!
+        var method = typeof(IMapper).GetMethod(nameof(IMapper.GetProjectionExpression))!
             .MakeGenericMethod(sourceType, typeof(TTarget));
         var projection = (System.Linq.Expressions.LambdaExpression)method.Invoke(mapper, null)!;
 

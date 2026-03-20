@@ -12,6 +12,7 @@ public static class ServiceCollectionExtensions
         where TProfile : NovelyMapperProfile
     {
         var mapper = new NovelyMapper();
+        services.AddSingleton<IMapper>(mapper);
         services.AddSingleton<INovelyMapper>(mapper);
         services.AddSingleton(mapper);
 
@@ -31,6 +32,7 @@ public static class ServiceCollectionExtensions
         var mapper = new NovelyMapper();
         configureOptions(mapper.Options);
 
+        services.AddSingleton<IMapper>(mapper);
         services.AddSingleton<INovelyMapper>(mapper);
         services.AddSingleton(mapper);
 
@@ -53,6 +55,7 @@ public static class ServiceCollectionExtensions
     public static IServiceCollection UseNovelyMapper(this IServiceCollection services, params Type[] profileTypes)
     {
         var mapper = new NovelyMapper();
+        services.AddSingleton<IMapper>(mapper);
         services.AddSingleton<INovelyMapper>(mapper);
         services.AddSingleton(mapper);
 
@@ -83,6 +86,7 @@ public static class ServiceCollectionExtensions
     public static IServiceCollection UseNovelyMapper(this IServiceCollection services, params Assembly[] assemblies)
     {
         var mapper = new NovelyMapper();
+        services.AddSingleton<IMapper>(mapper);
         services.AddSingleton<INovelyMapper>(mapper);
         services.AddSingleton(mapper);
 

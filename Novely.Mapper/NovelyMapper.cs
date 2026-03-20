@@ -5,9 +5,9 @@ using System.Reflection;
 namespace Novely.Mapper;
 
 /// <summary>
-/// Interface définissant les fonctionnalités principales d'un mapper NovelyMapper.
+/// Interface standard pour l'injection de dépendances du mapper.
 /// </summary>
-public interface INovelyMapper
+public interface IMapper
 {
     /// <summary>
     /// Crée une configuration de mapping entre TSource et TTarget.
@@ -38,6 +38,14 @@ public interface INovelyMapper
     /// Valide que toutes les propriétés cibles ont une source configurée.
     /// </summary>
     void AssertConfigurationIsValid();
+}
+
+/// <summary>
+/// Interface définissant les fonctionnalités principales d'un mapper NovelyMapper.
+/// Hérite de <see cref="IMapper"/> pour rétrocompatibilité.
+/// </summary>
+public interface INovelyMapper : IMapper
+{
 }
 
 /// <summary>

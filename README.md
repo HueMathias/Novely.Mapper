@@ -203,14 +203,14 @@ builder.Services.UseNovelyMapper(typeof(UserProfile), typeof(OrderProfile));
 builder.Services.UseNovelyMapper(typeof(Program).Assembly);
 ```
 
-Utilisez ensuite `INovelyMapper` via injection :
+Utilisez ensuite `IMapper` via injection :
 
 ```csharp
 public class UserService
 {
-    private readonly INovelyMapper _mapper;
+    private readonly IMapper _mapper;
 
-    public UserService(INovelyMapper mapper)
+    public UserService(IMapper mapper)
     {
         _mapper = mapper;
     }
@@ -222,6 +222,8 @@ public class UserService
     }
 }
 ```
+
+> **Note** : `INovelyMapper` est toujours disponible pour retrocompatibilite (il herite de `IMapper`). Les deux interfaces sont enregistrees dans le conteneur DI.
 
 > **Isolation** : chaque appel a `UseNovelyMapper` cree une instance independante du mapper. Deux `ServiceProvider` avec des profils differents ne s'interferent pas.
 
@@ -492,7 +494,9 @@ builder.Services.UseNovelyMapper<AppProfile>(options =>
 
 ## API Reference
 
-### INovelyMapper
+### IMapper
+
+Interface principale pour l'injection de dependances.
 
 | Methode | Description |
 |---------|-------------|
@@ -502,6 +506,8 @@ builder.Services.UseNovelyMapper<AppProfile>(options =>
 | `Map<TSource, TTarget>(IEnumerable)` | Mappe une collection (lazy) |
 | `GetProjectionExpression<S,T>()` | Retourne l'expression pour ProjectTo |
 | `AssertConfigurationIsValid()` | Valide tous les mappings enregistres |
+
+> `INovelyMapper` herite de `IMapper` et reste disponible pour retrocompatibilite.
 
 ### INovelyMapperConfig&lt;TSource, TTarget&gt;
 
