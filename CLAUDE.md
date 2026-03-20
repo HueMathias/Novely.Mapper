@@ -47,6 +47,15 @@ La solution contient deux projets :
 4. Propriétés matchées par nom ; mappings custom, objets imbriqués et collections de types complexes sont résolus récursivement
 5. En cas d'erreur runtime, le mapper re-exécute propriété par propriété pour identifier la fautive
 
+### Mapping automatique des propriétés de navigation (style EF Core)
+
+Le mapper résout automatiquement les propriétés de navigation imbriquées sans configuration explicite, à condition que les mappings des types éléments soient enregistrés :
+
+- **Objet imbriqué** : si `Source.Child` (type `A`) et `Target.Child` (type `B`) ont des types différents et que `CreateMap<A, B>()` est enregistré, le mapping est appliqué automatiquement (avec null-check pour les types référence)
+- **Collection imbriquée** : si `Source.Items` est `ICollection<A>` et `Target.Items` est `IEnumerable<B>`, `List<B>`, `ICollection<B>` ou `B[]`, et que `CreateMap<A, B>()` est enregistré, le mapper génère un `.Select(x => map(x)).ToList()` ou `.ToArray()` automatiquement
+- **Imbrication profonde** : ces résolutions sont récursives (ex: `Order.Customer.Contacts` fonctionne si chaque niveau a son mapping enregistré)
+- **Null-safety** : les propriétés de navigation null retournent `null` (pas d'exception)
+
 ### Injection de dépendances
 
 `UseNovelyMapper<TProfile>()` crée un `NovelyMapper`, l'enregistre en singleton sous `IMapper`, `INovelyMapper` et `NovelyMapper`, puis instancie le profil via `Activator.CreateInstance(typeof(TProfile), mapper)`. L'interface `IMapper` est l'interface principale pour l'injection. `INovelyMapper` hérite de `IMapper` et reste disponible pour rétrocompatibilité. Multi-profils : `UseNovelyMapper(params Type[])` ou `UseNovelyMapper(params Assembly[])`.

@@ -893,8 +893,11 @@ public class NovelyMapper : INovelyMapper
             .MakeGenericMethod(targetElemType);
         var toListCall = Expression.Call(toListMethod, selectCall);
 
-        if (targetCollectionType.IsAssignableFrom(toListCall.Type))
+        if (toListCall.Type == targetCollectionType)
             return toListCall;
+
+        if (targetCollectionType.IsAssignableFrom(toListCall.Type))
+            return Expression.Convert(toListCall, targetCollectionType);
 
         return Expression.Convert(toListCall, targetCollectionType);
     }
