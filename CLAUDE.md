@@ -15,6 +15,8 @@ dotnet test --no-build --verbosity normal  # Lancer tous les tests (NUnit)
 dotnet test --no-build --filter "FullyQualifiedName~NomDuTest"  # Lancer un test spécifique
 ```
 
+**Note** : `dotnet build -q` peut échouer de façon cryptique sur Windows après modification de fichiers — préférer `dotnet build` sans `-q`.
+
 ## Architecture
 
 La solution contient deux projets :
@@ -26,21 +28,43 @@ La solution contient deux projets :
 
 | Fichier | Rôle |
 |---|---|
-| `NovelyMapper.cs` | Interface `INovelyMapper` et implémentation. Compilation lazy des mappings via Expression Trees, cache dans `ConcurrentDictionary`. 3 méthodes : `Map<S,T>`, `MapList<S,T>`, `CreateMap<S,T>` |
-| `NovelyMapperConfig.cs` | Interface `INovelyMapperConfig<S,T>` et implémentation. Stocke les mappings custom par propriété. API fluent via `ForMember` |
-| `NovelyMapperProfile.cs` | Classe abstraite de base pour définir des profils de mapping. Propriété statique `Mapper` partagée entre profils |
-| `NovelyMapperExtensions.cs` | Extensions DI : `UseNovelyMapper<TProfile>()` enregistre le mapper en singleton dans `IServiceCollection` |
+| `NovelyMapper.cs` | Interface `INovelyMapper` et implémentation. Méthodes : `CreateMap`, `Map` (single/existing/collection), `GetProjectionExpression`, `AssertConfigurationIsValid`. Compilation lazy via Expression Trees, diagnostic runtime par propriété en cas d'erreur |
+| `NovelyMapperConfig.cs` | Interface `INovelyMapperConfig<S,T>` et implémentation. API fluent : `ForMember` (MemberOptions), `ReverseMap`, `BeforeMap`, `AfterMap`, `ConvertUsing`. Implémente `IMapperConfig` (interface interne non-générique pour la validation) |
+| `MemberOptions.cs` | Options par membre : `MapFrom`, `Ignore`, `MapWhen`, `NullSubstitute`, `ConvertUsing`. Implémente `IMemberOptions` (interface interne) |
+| `NovelyMapperProfile.cs` | Classe abstraite instance-based. Le profil reçoit `NovelyMapper` via constructeur (pas de static) |
+| `NovelyMapperEmptyProfile.cs` | Profil vide par défaut pour `UseNovelyMapper()` sans générique |
+| `NovelyMapperExtensions.cs` | Extensions DI : `UseNovelyMapper<T>()`, multi-profils par types ou scan d'assembly (`GetExportedTypes` pour exclure les non-publics) |
+| `NovelyMapperException.cs` | Exception dédiée avec propriétés structurées (`SourceType`, `TargetType`, `PropertyName`, `CollectionIndex`, `Suggestion`). Factory methods pour chaque scénario d'erreur |
+| `NovelyMapperValidationException.cs` | Hérite de `NovelyMapperException`. Levée par `AssertConfigurationIsValid()` avec liste d'erreurs formatées |
+| `QueryableExtensions.cs` | `ProjectTo<T>()` pour IQueryable (projection EF via expression) |
+| `NovelyMapperOptions.cs` | Options globales : `MissingPropertyBehavior` (Silent/Throw) |
 
 ### Flux de mapping
 
-1. Un profil hérite de `NovelyMapperProfile` et appelle `CreateMap<TSource, TTarget>()` dans son constructeur
-2. `ForMember(dest => dest.Prop, src => src.OtherProp)` permet le mapping custom de propriétés
+1. Un profil hérite de `NovelyMapperProfile(NovelyMapper mapper)` et appelle `CreateMap<S,T>()` dans son constructeur
+2. `ForMember(d => d.Prop, opt => opt.MapFrom(s => s.X))` configure les mappings via `MemberOptions`
 3. Au premier appel `Map<S,T>()`, le mapper compile un delegate via Expression Trees et le met en cache
-4. Les propriétés sont matchées automatiquement par nom ; les mappings custom surchargent ce comportement
+4. Propriétés matchées par nom ; mappings custom, objets imbriqués et collections de types complexes sont résolus récursivement
+5. En cas d'erreur runtime, le mapper re-exécute propriété par propriété pour identifier la fautive
 
 ### Injection de dépendances
 
-`UseNovelyMapper<TProfile>()` enregistre `NovelyMapper` et `INovelyMapper` en singleton, instancie le profil, et appelle `Initialize()` pour lier le mapper au profil.
+`UseNovelyMapper<TProfile>()` crée un `NovelyMapper`, l'enregistre en singleton, puis instancie le profil via `Activator.CreateInstance(typeof(TProfile), mapper)`. Multi-profils : `UseNovelyMapper(params Type[])` ou `UseNovelyMapper(params Assembly[])`.
+
+## Gestion d'erreurs
+
+- Toutes les erreurs du mapper sont des `NovelyMapperException` (ou sous-classes)
+- Les exceptions custom doivent hériter de `NovelyMapperException` pour le filtre `when (ex is not NovelyMapperException)`
+- Les erreurs de collection incluent l'index (`CollectionIndex`) et propagent la propriété fautive
+- Le diagnostic runtime "retry per-property" identifie la propriété en erreur sans impacter les performances nominales
+- `Expression.MemberInit` ne supporte pas `TryCatch` dans les bindings — c'est pourquoi le diagnostic utilise une re-exécution
+
+## Conventions
+
+- Les deux projets ont `<Nullable>enable</Nullable>` — utiliser les annotations nullable (`?`, `!`) correctement pour éviter les warnings
+- Tests NUnit : `[TestFixture]`, `[Test]`, `[SetUp]`, `[TearDown]`. Utiliser `Assert.Multiple` pour les assertions groupées
+- L'ancien `ForMember(dest, src)` à deux expressions est marqué `[Obsolete]` — les tests existants utilisent `#pragma warning disable CS0618`
+- 1 fichier de test par fonctionnalité (ex: `IgnoreTests.cs`, `ReverseMapTests.cs`, `ErrorMessageTests.cs`)
 
 ## CI/CD
 

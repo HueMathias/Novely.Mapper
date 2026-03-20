@@ -112,7 +112,7 @@ public class NovelyMapperConfig<TSource, TTarget> : INovelyMapperConfig<TSource,
                     if (prop == null) return false;
                     if (MemberConfigs.ContainsKey(prop.Name)) return true;
                     if (CustomMappings.ContainsKey(prop.Name)) return true;
-                    var sp = sourceType.GetProperty(p.Name, BindingFlags.Public | BindingFlags.Instance);
+                    var sp = sourceType.GetProperty(p.Name!, BindingFlags.Public | BindingFlags.Instance);
                     return sp != null;
                 });
 
