@@ -46,7 +46,8 @@ La solution contient deux projets :
 3. Au premier appel `Map<S,T>()`, le mapper compile un delegate via Expression Trees et le met en cache
 4. Propriétés matchées par nom ; mappings custom, objets imbriqués et collections de types complexes sont résolus récursivement
 5. La résolution de valeur (`ResolveValueExpression`) s'applique uniformément aux expressions `MapFrom` et aux paramètres constructeur : elle cherche d'abord un mapping imbriqué enregistré, puis un mapping de collection, puis les conversions nullable, et enfin un `Expression.Convert` classique
-6. En cas d'erreur runtime, le mapper re-exécute propriété par propriété pour identifier la fautive
+6. `Map<TTarget>(object source)` détecte automatiquement les collections : si `TTarget` est `IEnumerable<B>`, `List<B>`, `B[]`, etc. et que `source` est une collection de `A` avec un mapping `A → B` enregistré, il route vers `Map<A, B>(IEnumerable<A>)` puis matérialise le résultat selon le type cible
+7. En cas d'erreur runtime, le mapper re-exécute propriété par propriété pour identifier la fautive
 
 ### Mapping automatique des propriétés de navigation (style EF Core)
 
@@ -74,6 +75,15 @@ Le mapper gère automatiquement les conversions entre types nullable et non-null
 - **Collection imbriquée** : même résolution automatique pour les collections (ex: `MapFrom(s => s.Items)` où `Items` est `List<A>` et la cible est `List<B>`)
 - **Conversion nullable** : `MapFrom(s => s.NullableValue)` vers une propriété non-nullable est géré automatiquement
 - Cette résolution s'applique aussi aux paramètres de constructeur (records avec `MapFrom`)
+
+### Gestion des références circulaires
+
+Le mapper détecte et gère les références circulaires à deux niveaux :
+
+- **Compilation (Expression Trees)** : un `[ThreadStatic] HashSet<(Type, Type)> _compilationStack` traque les paires en cours de compilation. Quand un cycle est détecté (ex: `Customer → Supplier → Customer`), le mapper émet un appel runtime `Map<S,T>()` via `BuildRuntimeMapCall` au lieu de recurser infiniment. Cela s'applique à `BuildMappingExpression` et `CompileUpdateMapping`
+- **Runtime (données)** : un `[ThreadStatic] HashSet<object> _runtimeVisited` (avec `ReferenceEqualityComparer`) traque les objets source en cours de mapping. Quand le même objet source est rencontré une seconde fois (cycle dans les données), `Map<S,T>()` retourne `default!` (null pour les types référence). L'ensemble est nettoyé dans un `finally` : chaque objet est retiré après mapping, et l'ensemble est libéré quand l'appel top-level termine
+- **Arbres et graphes** : les types auto-référençants (ex: `TreeNode` avec `Children: List<TreeNode>`) fonctionnent sans configuration particulière. Les enfants sont mappés normalement tant qu'il n'y a pas de cycle dans les données
+- **Comportement** : la back-reference cyclique retourne `null`, pas l'instance déjà mappée (pas de `PreserveReferences`)
 
 ### Injection de dépendances
 

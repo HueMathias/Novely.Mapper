@@ -62,6 +62,21 @@ public class NovelyMapper : INovelyMapper
     private readonly ConcurrentDictionary<(Type, Type), Delegate> compiledUpdateMappings = new();
     internal readonly ConcurrentDictionary<(Type, Type), object> pendingConfigs = new();
 
+    /// <summary>
+    /// Pile de compilation thread-local pour détecter les références circulaires
+    /// lors de la construction des Expression Trees. Évite les StackOverflowException.
+    /// </summary>
+    [ThreadStatic]
+    private static HashSet<(Type, Type)>? _compilationStack;
+
+    /// <summary>
+    /// Ensemble thread-local des objets source en cours de mapping.
+    /// Détecte les cycles dans les données runtime (ex: customer.Supplier.Customer == customer)
+    /// et retourne default au lieu de recurser infiniment.
+    /// </summary>
+    [ThreadStatic]
+    private static HashSet<object>? _runtimeVisited;
+
     internal NovelyMapperOptions Options { get; set; } = new();
 
     public INovelyMapperConfig<TSource, TTarget> CreateMap<TSource, TTarget>()
@@ -77,6 +92,40 @@ public class NovelyMapper : INovelyMapper
 
         var sourceType = source.GetType();
         var targetType = typeof(TTarget);
+
+        // Détection de collection : si TTarget est IEnumerable<TElem> (ou List<>, ICollection<>, etc.)
+        // et que source implémente IEnumerable<TSrcElem>, router vers Map<TSrcElem, TElem>(IEnumerable<TSrcElem>)
+        if (TryGetCollectionElementType(targetType, out var targetElemType)
+            && TryGetCollectionElementType(sourceType, out var sourceElemType)
+            && pendingConfigs.ContainsKey((sourceElemType, targetElemType)))
+        {
+            // Appeler Map<TSrcElem, TElem>(IEnumerable<TSrcElem>) via réflexion
+            var collectionMapMethod = typeof(NovelyMapper)
+                .GetMethods(BindingFlags.Public | BindingFlags.Instance)
+                .First(m => m.Name == nameof(Map)
+                            && m.GetGenericArguments().Length == 2
+                            && m.GetParameters().Length == 1
+                            && m.GetParameters()[0].ParameterType.IsGenericType
+                            && m.GetParameters()[0].ParameterType.GetGenericTypeDefinition() == typeof(IEnumerable<>))
+                .MakeGenericMethod(sourceElemType, targetElemType);
+
+            var enumerable = collectionMapMethod.Invoke(this, [source])!;
+
+            // Matérialiser si le type cible est concret (List<T>, T[])
+            if (targetType.IsArray)
+            {
+                var toArrayMethod = typeof(Enumerable).GetMethod("ToArray")!
+                    .MakeGenericMethod(targetElemType);
+                return (TTarget)toArrayMethod.Invoke(null, [enumerable])!;
+            }
+
+            if (targetType.IsAssignableFrom(enumerable.GetType()))
+                return (TTarget)enumerable;
+
+            var toListMethod = typeof(Enumerable).GetMethod("ToList")!
+                .MakeGenericMethod(targetElemType);
+            return (TTarget)toListMethod.Invoke(null, [enumerable])!;
+        }
 
         // Appeler Map<TSource, TTarget> via réflexion avec le vrai type runtime
         var method = typeof(NovelyMapper)
@@ -94,6 +143,17 @@ public class NovelyMapper : INovelyMapper
     {
         ArgumentNullException.ThrowIfNull(source);
 
+        // Détection de cycle runtime pour les types référence :
+        // si cet objet source est déjà en cours de mapping dans la pile d'appels,
+        // retourner default (null) pour casser la boucle infinie.
+        bool isTopLevel = _runtimeVisited == null;
+        var visited = _runtimeVisited ??= new(ReferenceEqualityComparer.Instance);
+
+        if (!typeof(TSource).IsValueType && !visited.Add(source))
+            return default!;
+
+        try
+        {
         var key = (typeof(TSource), typeof(TTarget));
         if (!pendingConfigs.TryGetValue(key, out var configObj))
             throw NovelyMapperException.MissingMapping(typeof(TSource), typeof(TTarget));
@@ -160,12 +220,30 @@ public class NovelyMapper : INovelyMapper
 
         InvokeAfterMap(config, source, result);
         return result;
+
+        } // try
+        finally
+        {
+            if (!typeof(TSource).IsValueType)
+                visited.Remove(source);
+            if (isTopLevel)
+                _runtimeVisited = null;
+        }
     }
 
     public TTarget Map<TSource, TTarget>(TSource source, TTarget target)
     {
         ArgumentNullException.ThrowIfNull(source);
         ArgumentNullException.ThrowIfNull(target);
+
+        bool isTopLevel = _runtimeVisited == null;
+        var visited = _runtimeVisited ??= new(ReferenceEqualityComparer.Instance);
+
+        if (!typeof(TSource).IsValueType)
+            visited.Add(source);
+
+        try
+        {
 
         var key = (typeof(TSource), typeof(TTarget));
         if (!pendingConfigs.TryGetValue(key, out var configObj))
@@ -199,6 +277,15 @@ public class NovelyMapper : INovelyMapper
 
         InvokeAfterMap(config, source, target);
         return target;
+
+        } // try
+        finally
+        {
+            if (!typeof(TSource).IsValueType)
+                visited.Remove(source);
+            if (isTopLevel)
+                _runtimeVisited = null;
+        }
     }
 
     public IEnumerable<TTarget> Map<TSource, TTarget>(IEnumerable<TSource> sources)
@@ -463,6 +550,15 @@ public class NovelyMapper : INovelyMapper
         var memberConfigs = config?.GetMemberConfigs() ?? new Dictionary<string, IMemberOptions>();
         var customMappings = config?.GetCustomMappings() ?? new Dictionary<string, Delegate>();
 
+        // Ajouter la paire courante à la pile de compilation pour détecter les cycles
+        // (CompileUpdateMapping ne passe pas par BuildMappingExpression au top-level)
+        var stack = _compilationStack ??= new();
+        var key = (typeof(TSource), typeof(TTarget));
+        stack.Add(key);
+
+        try
+        {
+
         var assignments = new List<Expression>();
 
         foreach (var prop in typeof(TTarget).GetProperties(BindingFlags.Public | BindingFlags.Instance)
@@ -490,6 +586,12 @@ public class NovelyMapper : INovelyMapper
         var block = Expression.Block(assignments);
         var lambda = Expression.Lambda<Action<TSource, TTarget>>(block, sourceParam, targetParam);
         return lambda.Compile();
+
+        } // try
+        finally
+        {
+            stack.Remove(key);
+        }
     }
 
     #endregion
@@ -503,38 +605,55 @@ public class NovelyMapper : INovelyMapper
     internal Expression BuildMappingExpression(
         Type sourceType, Type targetType, Expression sourceExpr, object? configObj)
     {
-        var config = configObj as IMapperConfig;
-        var memberConfigs = config?.GetMemberConfigs() ?? new Dictionary<string, IMemberOptions>();
-        var customMappings = config?.GetCustomMappings() ?? new Dictionary<string, Delegate>();
-
-        // Construire l'appel au constructeur
-        var (newExpr, ctorMatchedProps) = BuildConstructorExpression(
-            sourceType, targetType, sourceExpr, memberConfigs, customMappings);
-
-        // Construire les bindings pour les propriétés non couvertes par le constructeur
-        var bindings = new List<MemberBinding>();
-
-        foreach (var prop in targetType.GetProperties(BindingFlags.Public | BindingFlags.Instance)
-                     .Where(p => p.CanWrite))
+        // Détection de référence circulaire : si cette paire est déjà en cours
+        // de compilation dans la pile d'appels, émettre un appel runtime Map()
+        // pour casser le cycle au lieu de recurser infiniment (StackOverflow).
+        var stack = _compilationStack ??= new();
+        var key = (sourceType, targetType);
+        if (!stack.Add(key))
         {
-            if (ctorMatchedProps.Contains(prop.Name)) continue;
-
-            try
-            {
-                var binding = BuildMemberBinding(
-                    sourceType, targetType, prop, sourceExpr,
-                    memberConfigs, customMappings);
-                if (binding != null)
-                    bindings.Add(binding);
-            }
-            catch (Exception ex) when (ex is not NovelyMapperException)
-            {
-                throw NovelyMapperException.MappingCompilationFailed(
-                    sourceType, targetType, prop.Name, ex);
-            }
+            return BuildRuntimeMapCall(sourceType, targetType, sourceExpr);
         }
 
-        return Expression.MemberInit(newExpr, bindings);
+        try
+        {
+            var config = configObj as IMapperConfig;
+            var memberConfigs = config?.GetMemberConfigs() ?? new Dictionary<string, IMemberOptions>();
+            var customMappings = config?.GetCustomMappings() ?? new Dictionary<string, Delegate>();
+
+            // Construire l'appel au constructeur
+            var (newExpr, ctorMatchedProps) = BuildConstructorExpression(
+                sourceType, targetType, sourceExpr, memberConfigs, customMappings);
+
+            // Construire les bindings pour les propriétés non couvertes par le constructeur
+            var bindings = new List<MemberBinding>();
+
+            foreach (var prop in targetType.GetProperties(BindingFlags.Public | BindingFlags.Instance)
+                         .Where(p => p.CanWrite))
+            {
+                if (ctorMatchedProps.Contains(prop.Name)) continue;
+
+                try
+                {
+                    var binding = BuildMemberBinding(
+                        sourceType, targetType, prop, sourceExpr,
+                        memberConfigs, customMappings);
+                    if (binding != null)
+                        bindings.Add(binding);
+                }
+                catch (Exception ex) when (ex is not NovelyMapperException)
+                {
+                    throw NovelyMapperException.MappingCompilationFailed(
+                        sourceType, targetType, prop.Name, ex);
+                }
+            }
+
+            return Expression.MemberInit(newExpr, bindings);
+        }
+        finally
+        {
+            stack.Remove(key);
+        }
     }
 
     private MemberBinding? BuildMemberBinding(
@@ -947,6 +1066,23 @@ public class NovelyMapper : INovelyMapper
     #endregion
 
     #region Helpers
+
+    /// <summary>
+    /// Émet un appel runtime à Map&lt;S,T&gt;() pour casser une référence circulaire
+    /// dans l'arbre d'expressions. Le mapping sera résolu au runtime via le cache.
+    /// </summary>
+    private Expression BuildRuntimeMapCall(Type sourceType, Type targetType, Expression sourceExpr)
+    {
+        var mapMethod = typeof(NovelyMapper)
+            .GetMethods(BindingFlags.Public | BindingFlags.Instance)
+            .First(m => m.Name == nameof(Map)
+                        && m.GetGenericArguments().Length == 2
+                        && m.GetParameters().Length == 1
+                        && m.GetParameters()[0].ParameterType == m.GetGenericArguments()[0])
+            .MakeGenericMethod(sourceType, targetType);
+
+        return Expression.Call(Expression.Constant(this), mapMethod, sourceExpr);
+    }
 
     private static T CreateInstance<T>()
     {
