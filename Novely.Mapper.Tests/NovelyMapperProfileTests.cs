@@ -1,5 +1,6 @@
-﻿using Microsoft.Extensions.DependencyInjection;
-using System;
+#pragma warning disable CS0618 // ForMember obsolète
+
+using Microsoft.Extensions.DependencyInjection;
 
 namespace Novely.Mapper.Tests;
 
@@ -8,7 +9,7 @@ public class NovelyMapperProfileTests
     #region Data
     public class TestProfile : NovelyMapperProfile
     {
-        public TestProfile()
+        public TestProfile(NovelyMapper mapper) : base(mapper)
         {
             CreateMap<EntityA, EntityB>()
                 .ForMember(dest => dest.Nom, src => src.Name);

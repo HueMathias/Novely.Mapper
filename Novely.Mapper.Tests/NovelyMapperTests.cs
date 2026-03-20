@@ -1,3 +1,5 @@
+#pragma warning disable CS0618 // ForMember obsolète
+
 namespace Novely.Mapper.Tests;
 
 // Classes de test

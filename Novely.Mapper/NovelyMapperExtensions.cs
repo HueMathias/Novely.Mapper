@@ -1,60 +1,95 @@
-﻿using Microsoft.Extensions.DependencyInjection;
+using System.Reflection;
+using Microsoft.Extensions.DependencyInjection;
 
 namespace Novely.Mapper;
 
 public static class ServiceCollectionExtensions
 {
     /// <summary>
-    /// Enregistre <see cref="NovelyMapper"/> dans le conteneur de services et initialise un profil de mappings.
+    /// Enregistre NovelyMapper avec un profil unique.
     /// </summary>
-    /// <typeparam name="TProfile">
-    /// Type du profil héritant de <see cref="NovelyMapperProfile"/> à instancier automatiquement.
-    /// Ce profil sera utilisé pour enregistrer tous les mappings au démarrage de l'application.
-    /// </typeparam>
-    /// <param name="services">Instance de <see cref="IServiceCollection"/> dans laquelle le mapper sera enregistré.</param>
-    /// <returns>La même instance de <see cref="IServiceCollection"/> pour permettre un chaînage fluide.</returns>
-    /// <remarks>
-    /// Cette méthode effectue les opérations suivantes :
-    /// <list type="bullet">
-    /// <item><description>Crée un singleton <see cref="NovelyMapper"/> et l'enregistre dans le DI.</description></item>
-    /// <item><description>Initialise le mapper global via <see cref="NovelyMapperProfile.Initialize(NovelyMapper)"/>.</description></item>
-    /// <item><description>Instancie le profil <typeparamref name="TProfile"/> pour enregistrer automatiquement les mappings.</description></item>
-    /// </list>
-    /// Cette extension permet de configurer le mapper dans <c>Program.cs</c> facilement et d'utiliser le mapping via DI dans l'application.
-    /// </remarks>
-    public static IServiceCollection UseNovelyMapper<TProfile>(this IServiceCollection services) where TProfile : NovelyMapperProfile, new()
+    public static IServiceCollection UseNovelyMapper<TProfile>(this IServiceCollection services)
+        where TProfile : NovelyMapperProfile
     {
         var mapper = new NovelyMapper();
-
-        // Initialisation du mapper global pour tous les profils
-        NovelyMapperProfile.Initialize(mapper);
-
-        // Enregistrement du mapper dans le DI
         services.AddSingleton<INovelyMapper>(mapper);
         services.AddSingleton(mapper);
 
-        // Instanciation du profil pour enregistrer les mappings
-        if (typeof(TProfile) != typeof(NovelyMapperProfile))
+        Activator.CreateInstance(typeof(TProfile), mapper);
+
+        return services;
+    }
+
+    /// <summary>
+    /// Enregistre NovelyMapper avec un profil unique et des options personnalisées.
+    /// </summary>
+    public static IServiceCollection UseNovelyMapper<TProfile>(
+        this IServiceCollection services,
+        Action<NovelyMapperOptions> configureOptions)
+        where TProfile : NovelyMapperProfile
+    {
+        var mapper = new NovelyMapper();
+        configureOptions(mapper.Options);
+
+        services.AddSingleton<INovelyMapper>(mapper);
+        services.AddSingleton(mapper);
+
+        Activator.CreateInstance(typeof(TProfile), mapper);
+
+        return services;
+    }
+
+    /// <summary>
+    /// Enregistre NovelyMapper avec un profil vide par défaut.
+    /// </summary>
+    public static IServiceCollection UseNovelyMapper(this IServiceCollection services)
+    {
+        return services.UseNovelyMapper<NovelyMapperEmptyProfile>();
+    }
+
+    /// <summary>
+    /// Enregistre NovelyMapper avec plusieurs types de profils.
+    /// </summary>
+    public static IServiceCollection UseNovelyMapper(this IServiceCollection services, params Type[] profileTypes)
+    {
+        var mapper = new NovelyMapper();
+        services.AddSingleton<INovelyMapper>(mapper);
+        services.AddSingleton(mapper);
+
+        foreach (var profileType in profileTypes)
         {
-            // Appel du constructeur du profil
-            _ = new TProfile();
+            if (!typeof(NovelyMapperProfile).IsAssignableFrom(profileType))
+                throw new ArgumentException($"{profileType.Name} ne dérive pas de NovelyMapperProfile.");
+
+            if (profileType.IsAbstract)
+                throw new ArgumentException($"{profileType.Name} est abstrait et ne peut pas être instancié.");
+
+            Activator.CreateInstance(profileType, mapper);
         }
 
         return services;
     }
 
     /// <summary>
-    /// Enregistre <see cref="NovelyMapper"/> dans le conteneur de services avec un profil vide par défaut.
+    /// Enregistre NovelyMapper en scannant les assemblies pour trouver tous les profils.
     /// </summary>
-    /// <param name="services">Instance de <see cref="IServiceCollection"/> dans laquelle le mapper sera enregistré.</param>
-    /// <returns>La même instance de <see cref="IServiceCollection"/> pour permettre un chaînage fluide.</returns>
-    /// <remarks>
-    /// Cette méthode utilise <see cref="NovelyMapperEmptyProfile"/> comme profil par défaut.
-    /// Elle est équivalente à <c>services.UseNovelyMapper&lt;NovelyMapperEmptyProfile&gt;()</c>.
-    /// Utile lorsque l'on souhaite simplement enregistrer le mapper global sans définir de mappings spécifiques.
-    /// </remarks>
-    public static IServiceCollection UseNovelyMapper(this IServiceCollection services)
+    public static IServiceCollection UseNovelyMapper(this IServiceCollection services, params Assembly[] assemblies)
     {
-        return services.UseNovelyMapper<NovelyMapperEmptyProfile>();
+        var mapper = new NovelyMapper();
+        services.AddSingleton<INovelyMapper>(mapper);
+        services.AddSingleton(mapper);
+
+        var profileTypes = assemblies
+            .SelectMany(a => a.GetTypes())
+            .Where(t => typeof(NovelyMapperProfile).IsAssignableFrom(t)
+                        && !t.IsAbstract
+                        && t != typeof(NovelyMapperEmptyProfile));
+
+        foreach (var profileType in profileTypes)
+        {
+            Activator.CreateInstance(profileType, mapper);
+        }
+
+        return services;
     }
 }

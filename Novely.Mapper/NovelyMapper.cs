@@ -1,4 +1,4 @@
-﻿using System.Collections.Concurrent;
+using System.Collections.Concurrent;
 using System.Linq.Expressions;
 using System.Reflection;
 
@@ -6,162 +6,654 @@ namespace Novely.Mapper;
 
 /// <summary>
 /// Interface définissant les fonctionnalités principales d'un mapper NovelyMapper.
-/// Fournit des méthodes pour créer des mappings entre types, mapper des objets uniques ou des collections,
-/// et accéder aux configurations de mapping.
 /// </summary>
 public interface INovelyMapper
 {
     /// <summary>
-    /// Crée une configuration de mapping entre le type source <typeparamref name="TSource"/> et le type cible <typeparamref name="TTarget"/>.
+    /// Crée une configuration de mapping entre TSource et TTarget.
     /// </summary>
-    /// <typeparam name="TSource">Le type source à mapper.</typeparam>
-    /// <typeparam name="TTarget">Le type cible vers lequel mapper. Doit avoir un constructeur public sans paramètre.</typeparam>
-    /// <returns>
-    /// Une instance d'<see cref="INovelyMapperConfig{TSource, TTarget}"/> permettant de configurer les règles de mapping,
-    /// comme <c>ForMember</c> ou <c>ReverseMap</c>.
-    /// </returns>
-    /// <remarks>
-    /// Cette méthode enregistre le mapping dans le <see cref="NovelyMapper"/> global utilisé par <see cref="NovelyMapperProfile"/>.
-    /// Elle doit être utilisée dans un profil hérité de <see cref="NovelyMapperProfile"/> ou directement sur le mapper global.
-    /// </remarks>
-    INovelyMapperConfig<TSource, TTarget> CreateMap<TSource, TTarget>() where TTarget : new();
+    INovelyMapperConfig<TSource, TTarget> CreateMap<TSource, TTarget>();
 
     /// <summary>
-    /// Mappe un objet du type <typeparamref name="TSource"/> vers un objet du type <typeparamref name="TTarget"/>.
+    /// Mappe un objet source vers un nouvel objet cible.
     /// </summary>
-    /// <typeparam name="TSource">Le type source de l'objet à mapper.</typeparam>
-    /// <typeparam name="TTarget">Le type cible vers lequel mapper l'objet. Doit avoir un constructeur public sans paramètre.</typeparam>
-    /// <param name="source">L'objet source à mapper.</param>
-    /// <returns>Une nouvelle instance de <typeparamref name="TTarget"/> contenant les valeurs mappées depuis <paramref name="source"/>.</returns>
-    /// <exception cref="ArgumentNullException">Si <paramref name="source"/> est <c>null</c>.</exception>
-    /// <exception cref="InvalidOperationException">
-    /// Si aucune configuration de mapping n'existe pour le couple <typeparamref name="TSource"/> → <typeparamref name="TTarget"/>.
-    /// </exception>
-    /// <remarks>
-    /// Cette méthode utilise les mappings préalablement définis via <see cref="INovelyMapperConfig{TSource, TTarget}"/> ou les profils hérités de <see cref="NovelyMapperProfile"/>.
-    /// </remarks>
-    TTarget Map<TSource, TTarget>(TSource source) where TTarget : new();
+    TTarget Map<TSource, TTarget>(TSource source);
 
     /// <summary>
-    /// Mappe une collection d'objets du type <typeparamref name="TSource"/> vers des objets du type <typeparamref name="TTarget"/>.
+    /// Mappe un objet source vers un objet cible existant.
     /// </summary>
-    /// <typeparam name="TSource">Le type source des objets à mapper.</typeparam>
-    /// <typeparam name="TTarget">Le type cible vers lequel mapper les objets. Doit avoir un constructeur public sans paramètre.</typeparam>
-    /// <param name="sources">La collection d'objets source à mapper.</param>
-    /// <returns>
-    /// Une séquence d'objets de type <typeparamref name="TTarget"/> contenant les valeurs mappées depuis <paramref name="sources"/>.
-    /// La séquence est générée paresseusement avec <c>yield return</c>, ce qui évite la création d'une liste complète inutilement.
-    /// </returns>
-    /// <exception cref="ArgumentNullException">Si <paramref name="sources"/> est <c>null</c>.</exception>
-    /// <exception cref="InvalidOperationException">
-    /// Si aucune configuration de mapping n'existe pour le couple <typeparamref name="TSource"/> → <typeparamref name="TTarget"/>.
-    /// </exception>
-    /// <remarks>
-    /// Cette méthode utilise les mappings préalablement définis via <see cref="INovelyMapperConfig{TSource, TTarget}"/> ou les profils hérités de <see cref="NovelyMapperProfile"/>.
-    /// </remarks>
-    IEnumerable<TTarget> Map<TSource, TTarget>(IEnumerable<TSource> sources) where TTarget : new();
+    TTarget Map<TSource, TTarget>(TSource source, TTarget target);
+
+    /// <summary>
+    /// Mappe une collection d'objets source vers des objets cibles.
+    /// </summary>
+    IEnumerable<TTarget> Map<TSource, TTarget>(IEnumerable<TSource> sources);
+
+    /// <summary>
+    /// Retourne l'expression de projection pour utilisation avec IQueryable (ProjectTo).
+    /// </summary>
+    Expression<Func<TSource, TTarget>> GetProjectionExpression<TSource, TTarget>();
+
+    /// <summary>
+    /// Valide que toutes les propriétés cibles ont une source configurée.
+    /// </summary>
+    void AssertConfigurationIsValid();
 }
 
 /// <summary>
 /// Implémentation principale du mapper NovelyMapper.
-/// Fournit des méthodes pour créer des mappings entre types, mapper des objets ou des collections,
-/// et gérer les configurations de mapping globales.
 /// </summary>
-/// <remarks>
-/// Cette classe implémente l'interface <see cref="INovelyMapper"/> et sert de point central pour tous les profils
-/// héritant de <see cref="NovelyMapperProfile"/>.
-/// Les mappings doivent être créés via <see cref="INovelyMapper.CreateMap{TSource, TTarget}"/> avant d'être utilisés.
-/// </remarks>
 public class NovelyMapper : INovelyMapper
 {
-    /// <summary>
-    /// Dictionnaire thread-safe contenant les mappings compilés.
-    /// La clé est un tuple (<see cref="TSource"/>, <see cref="TTarget"/>), et la valeur est un <see cref="Delegate"/>
-    /// représentant la fonction de mapping compilée.
-    /// </summary>
     private readonly ConcurrentDictionary<(Type, Type), Delegate> compiledMappings = new();
+    private readonly ConcurrentDictionary<(Type, Type), Delegate> compiledUpdateMappings = new();
+    internal readonly ConcurrentDictionary<(Type, Type), object> pendingConfigs = new();
 
-    /// <summary>
-    /// Dictionnaire thread-safe contenant les configurations de mapping en attente de compilation.
-    /// La clé est un tuple (<see cref="TSource"/>, <see cref="TTarget"/>), et la valeur est un objet de type <see cref="NovelyMapperConfig{TSource, TTarget}"/>.
-    /// </summary>
-    private readonly ConcurrentDictionary<(Type, Type), object> pendingConfigs = new();
+    internal NovelyMapperOptions Options { get; set; } = new();
 
-    public INovelyMapperConfig<TSource, TTarget> CreateMap<TSource, TTarget>() where TTarget : new()
+    public INovelyMapperConfig<TSource, TTarget> CreateMap<TSource, TTarget>()
     {
-        var config = new NovelyMapperConfig<TSource, TTarget>();
+        var config = new NovelyMapperConfig<TSource, TTarget>(this);
         pendingConfigs[(typeof(TSource), typeof(TTarget))] = config;
         return config;
     }
 
-    public TTarget Map<TSource, TTarget>(TSource source) where TTarget : new()
+    public TTarget Map<TSource, TTarget>(TSource source)
     {
         ArgumentNullException.ThrowIfNull(source);
 
+        var key = (typeof(TSource), typeof(TTarget));
+        if (!pendingConfigs.TryGetValue(key, out var configObj))
+            throw new InvalidOperationException(
+                $"Aucune configuration trouvée pour {typeof(TSource).Name} → {typeof(TTarget).Name}");
+
+        var config = (NovelyMapperConfig<TSource, TTarget>)configObj;
+
+        if (config.CustomConverter != null)
+            return config.CustomConverter(source);
+
+        if (config.BeforeMapAction != null)
+        {
+            var target = CreateInstance<TTarget>();
+            config.BeforeMapAction(source, target);
+            var updateFunc = GetOrCompileUpdateMapping<TSource, TTarget>();
+            updateFunc(source, target);
+            config.AfterMapAction?.Invoke(source, target);
+            return target;
+        }
+
         var func = GetOrCompileMapping<TSource, TTarget>();
-        return func(source);
+        var result = func(source);
+        config.AfterMapAction?.Invoke(source, result);
+        return result;
     }
 
-    public IEnumerable<TTarget> Map<TSource, TTarget>(IEnumerable<TSource> sources) where TTarget : new()
+    public TTarget Map<TSource, TTarget>(TSource source, TTarget target)
+    {
+        ArgumentNullException.ThrowIfNull(source);
+        ArgumentNullException.ThrowIfNull(target);
+
+        var key = (typeof(TSource), typeof(TTarget));
+        if (!pendingConfigs.TryGetValue(key, out var configObj))
+            throw new InvalidOperationException(
+                $"Aucune configuration trouvée pour {typeof(TSource).Name} → {typeof(TTarget).Name}");
+
+        var config = (NovelyMapperConfig<TSource, TTarget>)configObj;
+
+        config.BeforeMapAction?.Invoke(source, target);
+        var updateFunc = GetOrCompileUpdateMapping<TSource, TTarget>();
+        updateFunc(source, target);
+        config.AfterMapAction?.Invoke(source, target);
+        return target;
+    }
+
+    public IEnumerable<TTarget> Map<TSource, TTarget>(IEnumerable<TSource> sources)
     {
         ArgumentNullException.ThrowIfNull(sources);
 
-        var func = GetOrCompileMapping<TSource, TTarget>();
+        var key = (typeof(TSource), typeof(TTarget));
+        if (!pendingConfigs.ContainsKey(key))
+            throw new InvalidOperationException(
+                $"Aucune configuration trouvée pour {typeof(TSource).Name} → {typeof(TTarget).Name}");
 
-        foreach (var item in sources)
-            yield return func(item);
+        return sources.Select(item => Map<TSource, TTarget>(item));
     }
 
-    /// <summary>
-    /// Récupère le mapping compilé entre TSource et TTarget, ou le compile si nécessaire.
-    /// </summary>
-    private Func<TSource, TTarget> GetOrCompileMapping<TSource, TTarget>() where TTarget : new()
+    public Expression<Func<TSource, TTarget>> GetProjectionExpression<TSource, TTarget>()
+    {
+        var key = (typeof(TSource), typeof(TTarget));
+        if (!pendingConfigs.TryGetValue(key, out var configObj))
+            throw new InvalidOperationException(
+                $"Aucune configuration trouvée pour {typeof(TSource).Name} → {typeof(TTarget).Name}");
+
+        var param = Expression.Parameter(typeof(TSource), "src");
+        var body = BuildMappingExpression(typeof(TSource), typeof(TTarget), param, configObj);
+        return Expression.Lambda<Func<TSource, TTarget>>(body, param);
+    }
+
+    public void AssertConfigurationIsValid()
+    {
+        var errors = new List<string>();
+
+        foreach (var kvp in pendingConfigs)
+        {
+            var config = (IMapperConfig)kvp.Value;
+            var configErrors = config.Validate((s, t) => pendingConfigs.ContainsKey((s, t)));
+            errors.AddRange(configErrors);
+        }
+
+        if (errors.Count > 0)
+            throw new NovelyMapperValidationException(errors);
+    }
+
+    #region Compilation
+
+    private Func<TSource, TTarget> GetOrCompileMapping<TSource, TTarget>()
     {
         var key = (typeof(TSource), typeof(TTarget));
 
         if (!compiledMappings.TryGetValue(key, out var del))
         {
             if (!pendingConfigs.TryGetValue(key, out var pending))
-                throw new InvalidOperationException($"Aucune configuration trouvée pour {typeof(TSource).Name} → {typeof(TTarget).Name}");
+                throw new InvalidOperationException(
+                    $"Aucune configuration trouvée pour {typeof(TSource).Name} → {typeof(TTarget).Name}");
 
-            CompileMapping((NovelyMapperConfig<TSource, TTarget>)pending);
-            del = compiledMappings[key];
+            var param = Expression.Parameter(typeof(TSource), "src");
+            var body = BuildMappingExpression(typeof(TSource), typeof(TTarget), param, pending);
+            var lambda = Expression.Lambda<Func<TSource, TTarget>>(body, param);
+            del = lambda.Compile();
+            compiledMappings[key] = del;
         }
 
         return (Func<TSource, TTarget>)del;
     }
 
-
-    private void CompileMapping<TSource, TTarget>(NovelyMapperConfig<TSource, TTarget> config)
-            where TTarget : new()
+    private Action<TSource, TTarget> GetOrCompileUpdateMapping<TSource, TTarget>()
     {
         var key = (typeof(TSource), typeof(TTarget));
 
-        var param = Expression.Parameter(typeof(TSource), "src");
+        if (!compiledUpdateMappings.TryGetValue(key, out var del))
+        {
+            pendingConfigs.TryGetValue(key, out var configObj);
+            del = CompileUpdateMapping<TSource, TTarget>(configObj);
+            compiledUpdateMappings[key] = del;
+        }
 
-        var bindings = typeof(TTarget)
-            .GetProperties(BindingFlags.Public | BindingFlags.Instance)
-            .Where(p => p.CanWrite)
-            .Select(p =>
+        return (Action<TSource, TTarget>)del;
+    }
+
+    private Action<TSource, TTarget> CompileUpdateMapping<TSource, TTarget>(object? configObj)
+    {
+        var sourceParam = Expression.Parameter(typeof(TSource), "src");
+        var targetParam = Expression.Parameter(typeof(TTarget), "dest");
+        var config = configObj as IMapperConfig;
+        var memberConfigs = config?.GetMemberConfigs() ?? new Dictionary<string, IMemberOptions>();
+        var customMappings = config?.GetCustomMappings() ?? new Dictionary<string, Delegate>();
+
+        var assignments = new List<Expression>();
+
+        foreach (var prop in typeof(TTarget).GetProperties(BindingFlags.Public | BindingFlags.Instance)
+                     .Where(p => p.CanWrite))
+        {
+            var assignment = BuildPropertyAssignment(
+                typeof(TSource), typeof(TTarget), prop,
+                sourceParam, targetParam,
+                memberConfigs, customMappings);
+            if (assignment != null)
+                assignments.Add(assignment);
+        }
+
+        if (assignments.Count == 0)
+            assignments.Add(Expression.Empty());
+
+        var block = Expression.Block(assignments);
+        var lambda = Expression.Lambda<Action<TSource, TTarget>>(block, sourceParam, targetParam);
+        return lambda.Compile();
+    }
+
+    #endregion
+
+    #region Expression Building
+
+    /// <summary>
+    /// Construit l'expression MemberInit pour créer un nouvel objet cible.
+    /// Utilisé pour Map et ProjectTo, et récursivement pour les objets imbriqués.
+    /// </summary>
+    internal Expression BuildMappingExpression(
+        Type sourceType, Type targetType, Expression sourceExpr, object? configObj)
+    {
+        var config = configObj as IMapperConfig;
+        var memberConfigs = config?.GetMemberConfigs() ?? new Dictionary<string, IMemberOptions>();
+        var customMappings = config?.GetCustomMappings() ?? new Dictionary<string, Delegate>();
+
+        // Construire l'appel au constructeur
+        var (newExpr, ctorMatchedProps) = BuildConstructorExpression(
+            sourceType, targetType, sourceExpr, memberConfigs, customMappings);
+
+        // Construire les bindings pour les propriétés non couvertes par le constructeur
+        var bindings = new List<MemberBinding>();
+
+        foreach (var prop in targetType.GetProperties(BindingFlags.Public | BindingFlags.Instance)
+                     .Where(p => p.CanWrite))
+        {
+            if (ctorMatchedProps.Contains(prop.Name)) continue;
+
+            var binding = BuildMemberBinding(
+                sourceType, targetType, prop, sourceExpr,
+                memberConfigs, customMappings);
+            if (binding != null)
+                bindings.Add(binding);
+        }
+
+        return Expression.MemberInit(newExpr, bindings);
+    }
+
+    private MemberBinding? BuildMemberBinding(
+        Type sourceType, Type targetType, PropertyInfo targetProp, Expression sourceExpr,
+        IReadOnlyDictionary<string, IMemberOptions> memberConfigs,
+        IReadOnlyDictionary<string, Delegate> customMappings)
+    {
+        Expression? valueExpr = null;
+
+        if (memberConfigs.TryGetValue(targetProp.Name, out var opts))
+        {
+            if (opts.IsIgnored) return null;
+
+            if (opts.MemberConverter != null)
             {
-                if (config.CustomMappings.TryGetValue(p.Name, out var customGetter))
+                valueExpr = Expression.Convert(
+                    Expression.Invoke(Expression.Constant(opts.MemberConverter), sourceExpr),
+                    targetProp.PropertyType);
+            }
+            else if (opts.MapFromExpression != null)
+            {
+                valueExpr = InlineLambda(opts.MapFromExpression, sourceExpr);
+                valueExpr = UnwrapObjectConvert(valueExpr);
+                if (valueExpr.Type != targetProp.PropertyType)
+                    valueExpr = Expression.Convert(valueExpr, targetProp.PropertyType);
+            }
+            else
+            {
+                var sp = sourceType.GetProperty(targetProp.Name, BindingFlags.Public | BindingFlags.Instance);
+                if (sp == null) return null;
+                valueExpr = Expression.Property(sourceExpr, sp);
+            }
+
+            // NullSubstitute
+            if (opts.HasNullSubstitute && !targetProp.PropertyType.IsValueType)
+            {
+                valueExpr = Expression.Coalesce(
+                    valueExpr,
+                    Expression.Constant(opts.NullSubstituteValue, targetProp.PropertyType));
+            }
+
+            // Condition (ternaire pour MemberInit)
+            if (opts.Condition != null)
+            {
+                var conditionResult = Expression.Invoke(
+                    Expression.Constant(opts.Condition), sourceExpr);
+                valueExpr = Expression.Condition(
+                    conditionResult, valueExpr, Expression.Default(targetProp.PropertyType));
+            }
+        }
+        else if (customMappings.TryGetValue(targetProp.Name, out var customGetter))
+        {
+            var invoke = Expression.Invoke(Expression.Constant(customGetter), sourceExpr);
+            valueExpr = Expression.Convert(invoke, targetProp.PropertyType);
+        }
+        else
+        {
+            valueExpr = BuildConventionBasedExpression(sourceType, targetProp, sourceExpr);
+        }
+
+        if (valueExpr == null) return null;
+
+        return Expression.Bind(targetProp, valueExpr);
+    }
+
+    private Expression? BuildPropertyAssignment(
+        Type sourceType, Type targetType, PropertyInfo targetProp,
+        Expression sourceExpr, Expression targetExpr,
+        IReadOnlyDictionary<string, IMemberOptions> memberConfigs,
+        IReadOnlyDictionary<string, Delegate> customMappings)
+    {
+        Expression? valueExpr = null;
+
+        if (memberConfigs.TryGetValue(targetProp.Name, out var opts))
+        {
+            if (opts.IsIgnored) return null;
+
+            if (opts.MemberConverter != null)
+            {
+                valueExpr = Expression.Convert(
+                    Expression.Invoke(Expression.Constant(opts.MemberConverter), sourceExpr),
+                    targetProp.PropertyType);
+            }
+            else if (opts.MapFromExpression != null)
+            {
+                valueExpr = InlineLambda(opts.MapFromExpression, sourceExpr);
+                valueExpr = UnwrapObjectConvert(valueExpr);
+                if (valueExpr.Type != targetProp.PropertyType)
+                    valueExpr = Expression.Convert(valueExpr, targetProp.PropertyType);
+            }
+            else
+            {
+                var sp = sourceType.GetProperty(targetProp.Name, BindingFlags.Public | BindingFlags.Instance);
+                if (sp == null) return null;
+                valueExpr = Expression.Property(sourceExpr, sp);
+            }
+
+            // NullSubstitute
+            if (opts.HasNullSubstitute && !targetProp.PropertyType.IsValueType)
+            {
+                valueExpr = Expression.Coalesce(
+                    valueExpr,
+                    Expression.Constant(opts.NullSubstituteValue, targetProp.PropertyType));
+            }
+
+            // Condition (pour update : IfThen préserve la valeur existante)
+            if (opts.Condition != null)
+            {
+                var conditionResult = Expression.Invoke(
+                    Expression.Constant(opts.Condition), sourceExpr);
+                return Expression.IfThen(
+                    conditionResult,
+                    Expression.Assign(Expression.Property(targetExpr, targetProp), valueExpr));
+            }
+        }
+        else if (customMappings.TryGetValue(targetProp.Name, out var customGetter))
+        {
+            var invoke = Expression.Invoke(Expression.Constant(customGetter), sourceExpr);
+            valueExpr = Expression.Convert(invoke, targetProp.PropertyType);
+        }
+        else
+        {
+            valueExpr = BuildConventionBasedExpression(sourceType, targetProp, sourceExpr);
+        }
+
+        if (valueExpr == null) return null;
+
+        return Expression.Assign(Expression.Property(targetExpr, targetProp), valueExpr);
+    }
+
+    private Expression? BuildConventionBasedExpression(
+        Type sourceType, PropertyInfo targetProp, Expression sourceExpr)
+    {
+        var sourceProp = sourceType.GetProperty(targetProp.Name, BindingFlags.Public | BindingFlags.Instance);
+        if (sourceProp == null) return null;
+
+        // Types identiques
+        if (sourceProp.PropertyType == targetProp.PropertyType)
+            return Expression.Property(sourceExpr, sourceProp);
+
+        // Type assignable
+        if (targetProp.PropertyType.IsAssignableFrom(sourceProp.PropertyType))
+            return Expression.Convert(Expression.Property(sourceExpr, sourceProp), targetProp.PropertyType);
+
+        // Objet imbriqué (types complexes différents avec mapping enregistré)
+        if (IsComplexType(sourceProp.PropertyType) && IsComplexType(targetProp.PropertyType)
+            && pendingConfigs.ContainsKey((sourceProp.PropertyType, targetProp.PropertyType)))
+        {
+            var nestedSource = Expression.Property(sourceExpr, sourceProp);
+            pendingConfigs.TryGetValue((sourceProp.PropertyType, targetProp.PropertyType), out var nestedConfig);
+            var nestedMapping = BuildMappingExpression(
+                sourceProp.PropertyType, targetProp.PropertyType, nestedSource, nestedConfig);
+
+            // Null check pour les types référence
+            if (!sourceProp.PropertyType.IsValueType)
+            {
+                return Expression.Condition(
+                    Expression.Equal(nestedSource, Expression.Constant(null, sourceProp.PropertyType)),
+                    Expression.Default(targetProp.PropertyType),
+                    nestedMapping);
+            }
+
+            return nestedMapping;
+        }
+
+        // Collection de types complexes
+        if (TryGetCollectionElementType(sourceProp.PropertyType, out var sourceElem)
+            && TryGetCollectionElementType(targetProp.PropertyType, out var targetElem)
+            && sourceElem != targetElem
+            && pendingConfigs.ContainsKey((sourceElem, targetElem)))
+        {
+            var sourceCollection = Expression.Property(sourceExpr, sourceProp);
+            var collectionMapping = BuildCollectionMappingExpression(
+                sourceProp.PropertyType, sourceElem, targetElem, targetProp.PropertyType,
+                sourceCollection);
+
+            // Null check pour les collections
+            if (!sourceProp.PropertyType.IsValueType)
+            {
+                return Expression.Condition(
+                    Expression.Equal(sourceCollection, Expression.Constant(null, sourceProp.PropertyType)),
+                    Expression.Default(targetProp.PropertyType),
+                    collectionMapping);
+            }
+
+            return collectionMapping;
+        }
+
+        return null;
+    }
+
+    #endregion
+
+    #region Constructor Resolution
+
+    private (NewExpression, HashSet<string>) BuildConstructorExpression(
+        Type sourceType, Type targetType, Expression sourceExpr,
+        IReadOnlyDictionary<string, IMemberOptions> memberConfigs,
+        IReadOnlyDictionary<string, Delegate> customMappings)
+    {
+        // Essayer le constructeur sans paramètre en premier
+        var defaultCtor = targetType.GetConstructor(
+            BindingFlags.Public | BindingFlags.Instance, Type.EmptyTypes);
+        if (defaultCtor != null)
+            return (Expression.New(defaultCtor), new HashSet<string>(StringComparer.OrdinalIgnoreCase));
+
+        // Chercher le meilleur constructeur paramétré
+        var ctors = targetType.GetConstructors(BindingFlags.Public | BindingFlags.Instance);
+
+        foreach (var ctor in ctors.OrderByDescending(c => c.GetParameters().Length))
+        {
+            var parameters = ctor.GetParameters();
+            var args = new Expression[parameters.Length];
+            var matched = true;
+            var matchedProps = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+            for (int i = 0; i < parameters.Length; i++)
+            {
+                var paramName = parameters[i].Name!;
+                Expression? argExpr = null;
+
+                // Trouver la propriété cible correspondant au paramètre constructeur
+                var targetProp = targetType
+                    .GetProperties(BindingFlags.Public | BindingFlags.Instance)
+                    .FirstOrDefault(p =>
+                        string.Equals(p.Name, paramName, StringComparison.OrdinalIgnoreCase));
+
+                // Vérifier les MemberOptions
+                if (targetProp != null && memberConfigs.TryGetValue(targetProp.Name, out var opts))
                 {
-                    var invoke = Expression.Invoke(Expression.Constant(customGetter), param);
-                    var converted = Expression.Convert(invoke, p.PropertyType);
-                    return Expression.Bind(p, converted);
+                    if (opts.MemberConverter != null)
+                    {
+                        argExpr = Expression.Convert(
+                            Expression.Invoke(Expression.Constant(opts.MemberConverter), sourceExpr),
+                            parameters[i].ParameterType);
+                    }
+                    else if (opts.MapFromExpression != null)
+                    {
+                        argExpr = InlineLambda(opts.MapFromExpression, sourceExpr);
+                        argExpr = UnwrapObjectConvert(argExpr);
+                        if (argExpr.Type != parameters[i].ParameterType)
+                            argExpr = Expression.Convert(argExpr, parameters[i].ParameterType);
+                    }
                 }
 
-                var sourceProp = typeof(TSource).GetProperty(p.Name);
-                if (sourceProp == null) return null;
+                // Vérifier les legacy CustomMappings
+                if (argExpr == null && targetProp != null
+                    && customMappings.TryGetValue(targetProp.Name, out var customGetter))
+                {
+                    var invoke = Expression.Invoke(Expression.Constant(customGetter), sourceExpr);
+                    argExpr = Expression.Convert(invoke, parameters[i].ParameterType);
+                }
 
-                return Expression.Bind(p, Expression.Property(param, sourceProp));
-            })
-            .Where(b => b != null)
-            .ToArray();
+                // Convention : matcher par nom (case-insensitive)
+                if (argExpr == null)
+                {
+                    var sourceProp = sourceType
+                        .GetProperties(BindingFlags.Public | BindingFlags.Instance)
+                        .FirstOrDefault(p =>
+                            string.Equals(p.Name, paramName, StringComparison.OrdinalIgnoreCase));
 
-        var body = Expression.MemberInit(Expression.New(typeof(TTarget)), bindings);
-        var lambda = Expression.Lambda<Func<TSource, TTarget>>(body, param);
+                    if (sourceProp != null
+                        && parameters[i].ParameterType.IsAssignableFrom(sourceProp.PropertyType))
+                    {
+                        argExpr = Expression.Property(sourceExpr, sourceProp);
+                    }
+                }
 
-        compiledMappings[key] = lambda.Compile();
+                // Paramètre ignoré → utiliser default
+                if (argExpr == null && targetProp != null
+                    && memberConfigs.TryGetValue(targetProp.Name, out var ignoredOpts)
+                    && ignoredOpts.IsIgnored)
+                {
+                    argExpr = Expression.Default(parameters[i].ParameterType);
+                }
+
+                // Paramètre optionnel avec valeur par défaut
+                if (argExpr == null && parameters[i].HasDefaultValue)
+                {
+                    argExpr = Expression.Constant(
+                        parameters[i].DefaultValue, parameters[i].ParameterType);
+                }
+
+                if (argExpr == null)
+                {
+                    matched = false;
+                    break;
+                }
+
+                args[i] = argExpr;
+                if (targetProp != null) matchedProps.Add(targetProp.Name);
+            }
+
+            if (matched)
+                return (Expression.New(ctor, args), matchedProps);
+        }
+
+        throw new InvalidOperationException(
+            $"Aucun constructeur approprié trouvé pour {targetType.Name}. " +
+            $"Le type doit avoir soit un constructeur sans paramètre, " +
+            $"soit un constructeur dont les paramètres correspondent aux propriétés source.");
     }
+
+    #endregion
+
+    #region Collection Mapping
+
+    private Expression BuildCollectionMappingExpression(
+        Type sourceCollectionType, Type sourceElemType, Type targetElemType, Type targetCollectionType,
+        Expression sourceCollectionExpr)
+    {
+        // Construire : source.Select(x => new TargetElem { ... }).ToList() ou .ToArray()
+        var elemParam = Expression.Parameter(sourceElemType, "x");
+        pendingConfigs.TryGetValue((sourceElemType, targetElemType), out var elemConfig);
+        var elemMapping = BuildMappingExpression(sourceElemType, targetElemType, elemParam, elemConfig);
+        var elemLambda = Expression.Lambda(elemMapping, elemParam);
+
+        var selectMethod = typeof(Enumerable).GetMethods()
+            .First(m => m.Name == "Select" && m.GetParameters().Length == 2)
+            .MakeGenericMethod(sourceElemType, targetElemType);
+        var selectCall = Expression.Call(selectMethod, sourceCollectionExpr, elemLambda);
+
+        if (targetCollectionType.IsArray)
+        {
+            var toArrayMethod = typeof(Enumerable).GetMethod("ToArray")!
+                .MakeGenericMethod(targetElemType);
+            return Expression.Call(toArrayMethod, selectCall);
+        }
+
+        var toListMethod = typeof(Enumerable).GetMethod("ToList")!
+            .MakeGenericMethod(targetElemType);
+        var toListCall = Expression.Call(toListMethod, selectCall);
+
+        if (targetCollectionType.IsAssignableFrom(toListCall.Type))
+            return toListCall;
+
+        return Expression.Convert(toListCall, targetCollectionType);
+    }
+
+    #endregion
+
+    #region Helpers
+
+    private static T CreateInstance<T>()
+    {
+        var defaultCtor = typeof(T).GetConstructor(
+            BindingFlags.Public | BindingFlags.Instance, Type.EmptyTypes);
+        if (defaultCtor != null)
+            return (T)defaultCtor.Invoke(null);
+
+        throw new InvalidOperationException(
+            $"Impossible de créer une instance de {typeof(T).Name}. " +
+            $"BeforeMap et Map vers existant nécessitent un constructeur sans paramètre.");
+    }
+
+    private static bool IsComplexType(Type type)
+    {
+        return !type.IsPrimitive
+               && type != typeof(string)
+               && type != typeof(decimal)
+               && type != typeof(DateTime)
+               && type != typeof(DateTimeOffset)
+               && type != typeof(Guid)
+               && !type.IsEnum
+               && !(type.IsValueType && Nullable.GetUnderlyingType(type) != null);
+    }
+
+    private static bool TryGetCollectionElementType(Type type, out Type elementType)
+    {
+        elementType = null!;
+
+        if (type.IsArray)
+        {
+            elementType = type.GetElementType()!;
+            return IsComplexType(elementType);
+        }
+
+        var enumerable = type.GetInterfaces()
+            .Concat([type])
+            .FirstOrDefault(i => i.IsGenericType && i.GetGenericTypeDefinition() == typeof(IEnumerable<>));
+
+        if (enumerable != null)
+        {
+            elementType = enumerable.GetGenericArguments()[0];
+            return IsComplexType(elementType);
+        }
+
+        return false;
+    }
+
+    internal static Expression InlineLambda(LambdaExpression lambda, Expression argument)
+    {
+        return new ParameterReplacer(lambda.Parameters[0], argument).Visit(lambda.Body);
+    }
+
+    internal static Expression UnwrapObjectConvert(Expression expr)
+    {
+        if (expr is UnaryExpression { NodeType: ExpressionType.Convert } unary
+            && unary.Type == typeof(object))
+            return unary.Operand;
+        return expr;
+    }
+
+    private class ParameterReplacer(ParameterExpression oldParam, Expression newParam) : ExpressionVisitor
+    {
+        protected override Expression VisitParameter(ParameterExpression node)
+            => node == oldParam ? newParam : base.VisitParameter(node);
+    }
+
+    #endregion
 }
