@@ -15,6 +15,11 @@ public interface IMapper
     INovelyMapperConfig<TSource, TTarget> CreateMap<TSource, TTarget>();
 
     /// <summary>
+    /// Mappe un objet source vers un nouvel objet cible. Le type source est inféré au runtime.
+    /// </summary>
+    TTarget Map<TTarget>(object source);
+
+    /// <summary>
     /// Mappe un objet source vers un nouvel objet cible.
     /// </summary>
     TTarget Map<TSource, TTarget>(TSource source);
@@ -64,6 +69,25 @@ public class NovelyMapper : INovelyMapper
         var config = new NovelyMapperConfig<TSource, TTarget>(this);
         pendingConfigs[(typeof(TSource), typeof(TTarget))] = config;
         return config;
+    }
+
+    public TTarget Map<TTarget>(object source)
+    {
+        ArgumentNullException.ThrowIfNull(source);
+
+        var sourceType = source.GetType();
+        var targetType = typeof(TTarget);
+
+        // Appeler Map<TSource, TTarget> via réflexion avec le vrai type runtime
+        var method = typeof(NovelyMapper)
+            .GetMethods()
+            .First(m => m.Name == nameof(Map)
+                        && m.GetGenericArguments().Length == 2
+                        && m.GetParameters().Length == 1
+                        && m.GetParameters()[0].ParameterType == m.GetGenericArguments()[0])
+            .MakeGenericMethod(sourceType, targetType);
+
+        return (TTarget)method.Invoke(this, [source])!;
     }
 
     public TTarget Map<TSource, TTarget>(TSource source)
