@@ -111,4 +111,100 @@ public class ProjectToTests
         Assert.Throws<NovelyMapperException>(
             () => list.AsQueryable().ProjectTo<Source, Target>(mapper).ToList());
     }
+
+    #region Circular reference models
+
+    private class CustomerEntity
+    {
+        public int Id { get; set; }
+        public string Name { get; set; } = "";
+        public SupplierEntity? Supplier { get; set; }
+    }
+
+    private class SupplierEntity
+    {
+        public int Id { get; set; }
+        public string CompanyName { get; set; } = "";
+        public CustomerEntity? Customer { get; set; }
+    }
+
+    private class CustomerProjection
+    {
+        public int Id { get; set; }
+        public string Name { get; set; } = "";
+        public SupplierProjection? Supplier { get; set; }
+    }
+
+    private class SupplierProjection
+    {
+        public int Id { get; set; }
+        public string CompanyName { get; set; } = "";
+        public CustomerProjection? Customer { get; set; }
+    }
+
+    #endregion
+
+    [Test]
+    public void ProjectTo_WithCircularReference_ShouldNotContainRuntimeCall()
+    {
+        var mapper = new NovelyMapper();
+        mapper.CreateMap<CustomerEntity, CustomerProjection>();
+        mapper.CreateMap<SupplierEntity, SupplierProjection>();
+
+        // Doit compiler sans StackOverflow
+        var expr = mapper.GetProjectionExpression<CustomerEntity, CustomerProjection>();
+        Assert.That(expr, Is.Not.Null);
+
+        // L'expression ne doit pas contenir de MethodCallExpression vers Map
+        // (non traduisible en SQL) — vérifier via compilation et exécution
+        var func = expr.Compile();
+        var customer = new CustomerEntity
+        {
+            Id = 1,
+            Name = "Alice",
+            Supplier = new SupplierEntity
+            {
+                Id = 10,
+                CompanyName = "Acme",
+                Customer = null
+            }
+        };
+
+        var result = func(customer);
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(result.Id, Is.EqualTo(1));
+            Assert.That(result.Supplier, Is.Not.Null);
+            Assert.That(result.Supplier!.CompanyName, Is.EqualTo("Acme"));
+            // Back-reference circulaire = null en projection
+            Assert.That(result.Supplier.Customer, Is.Null);
+        });
+    }
+
+    [Test]
+    public void ProjectTo_WithCircularReference_ShouldProjectCollection()
+    {
+        var mapper = new NovelyMapper();
+        mapper.CreateMap<CustomerEntity, CustomerProjection>();
+        mapper.CreateMap<SupplierEntity, SupplierProjection>();
+
+        var customers = new List<CustomerEntity>
+        {
+            new() { Id = 1, Name = "Alice", Supplier = new SupplierEntity { Id = 10, CompanyName = "Acme" } },
+            new() { Id = 2, Name = "Bob", Supplier = null }
+        };
+
+        var result = customers.AsQueryable()
+            .ProjectTo<CustomerEntity, CustomerProjection>(mapper)
+            .ToList();
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(result, Has.Count.EqualTo(2));
+            Assert.That(result[0].Supplier, Is.Not.Null);
+            Assert.That(result[0].Supplier!.Customer, Is.Null);
+            Assert.That(result[1].Supplier, Is.Null);
+        });
+    }
 }

@@ -6,6 +6,9 @@ Un mapper d'objets **leger et fluent** pour .NET 8.0, alternative open-source a 
 - API fluent : `ForMember`, `Ignore`, `MapFrom`, `MapWhen`, `NullSubstitute`, `ConvertUsing`, `ReverseMap`
 - Support des `record` types (constructeurs parametres)
 - Mapping d'objets imbriques et de collections
+- Conversion automatique `T?` ↔ `T` et resolution des mappings imbriques dans `MapFrom`
+- Gestion des references circulaires (pas de `StackOverflowException`)
+- Inference de collection dans `Map<TTarget>(object)` (ex: `Map<IEnumerable<Dto>>(list)`)
 - Projection `IQueryable` (`ProjectTo`) pour Entity Framework
 - `BeforeMap` / `AfterMap`, `Map` vers objet existant
 - Validation de configuration (`AssertConfigurationIsValid`)

@@ -77,6 +77,13 @@ public class NovelyMapper : INovelyMapper
     [ThreadStatic]
     private static HashSet<object>? _runtimeVisited;
 
+    /// <summary>
+    /// Indique que la compilation est en mode projection (Expression pure pour IQueryable/EF).
+    /// En cas de cycle, émet Expression.Default au lieu de BuildRuntimeMapCall (non traduisible en SQL).
+    /// </summary>
+    [ThreadStatic]
+    private static bool _projectionMode;
+
     internal NovelyMapperOptions Options { get; set; } = new();
 
     public INovelyMapperConfig<TSource, TTarget> CreateMap<TSource, TTarget>()
@@ -331,6 +338,7 @@ public class NovelyMapper : INovelyMapper
         if (!pendingConfigs.TryGetValue(key, out var configObj))
             throw NovelyMapperException.MissingMapping(typeof(TSource), typeof(TTarget));
 
+        _projectionMode = true;
         try
         {
             var param = Expression.Parameter(typeof(TSource), "src");
@@ -341,6 +349,10 @@ public class NovelyMapper : INovelyMapper
         {
             throw NovelyMapperException.MappingCompilationFailed(
                 typeof(TSource), typeof(TTarget), null, ex);
+        }
+        finally
+        {
+            _projectionMode = false;
         }
     }
 
@@ -612,6 +624,11 @@ public class NovelyMapper : INovelyMapper
         var key = (sourceType, targetType);
         if (!stack.Add(key))
         {
+            // En mode projection (IQueryable/EF), émettre default (null) car un appel
+            // runtime Map<S,T>() n'est pas traduisible en SQL.
+            if (_projectionMode)
+                return Expression.Default(targetType);
+
             return BuildRuntimeMapCall(sourceType, targetType, sourceExpr);
         }
 

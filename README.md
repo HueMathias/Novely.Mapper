@@ -8,6 +8,10 @@ Il s'inspire d'AutoMapper mais reste **100% gratuit et open-source**.
 - API fluent avec profils, `ForMember`, `Ignore`, `ReverseMap`, `ConvertUsing`, etc.
 - Support des `record` types (constructeurs parametres)
 - Mapping d'objets imbriques et de collections
+- Conversion automatique des types nullable (`T?` → `T`, `T` → `T?`)
+- Resolution automatique des mappings imbriques dans `MapFrom`
+- Gestion des references circulaires (pas de `StackOverflowException`)
+- Inference de collection dans `Map<TTarget>(object)` (ex: `Map<IEnumerable<Dto>>(list)`)
 - Projection `IQueryable` (`ProjectTo`) pour Entity Framework
 - Injection de dependances avec profils multiples
 
@@ -38,6 +42,10 @@ Il s'inspire d'AutoMapper mais reste **100% gratuit et open-source**.
   - [Mapping de records](#mapping-de-records)
   - [Mapping d'objets imbriques](#mapping-dobjets-imbriques)
   - [Mapping de collections imbriquees](#mapping-de-collections-imbriquees)
+  - [Conversion automatique des types nullable](#conversion-automatique-des-types-nullable)
+  - [Resolution automatique dans MapFrom](#resolution-automatique-dans-mapfrom)
+  - [References circulaires](#references-circulaires)
+  - [Mapping de collection via Map&lt;TTarget&gt;](#mapping-de-collection-via-mapttarget)
   - [ProjectTo (IQueryable)](#projectto-iqueryable)
   - [Validation de la configuration](#validation-de-la-configuration)
   - [Options globales](#options-globales)
@@ -419,6 +427,99 @@ mapper.CreateMap<Parent, ParentDto>();
 
 Types de collections supportes : `List<T>`, `IEnumerable<T>`, `ICollection<T>`, `IList<T>`, `T[]`.
 
+### Conversion automatique des types nullable
+
+NovelyMapper convertit automatiquement entre types nullable et non-nullable quand les proprietes ont le meme nom :
+
+```csharp
+public class Source { public int? Value { get; set; } }
+public class Target { public int Value { get; set; } }
+
+mapper.CreateMap<Source, Target>();
+
+var result = mapper.Map<Source, Target>(new Source { Value = 42 });
+// result.Value == 42
+
+var result2 = mapper.Map<Source, Target>(new Source { Value = null });
+// result2.Value == 0 (default)
+```
+
+Conversions supportees :
+- `T?` → `T` : utilise `.GetValueOrDefault()` (retourne `default(T)` si null)
+- `T` → `T?` : conversion implicite
+- `Nullable<T>` → `Nullable<U>` : conversion quand les types sous-jacents sont compatibles
+
+Fonctionne pour les classes, les records (constructeurs parametres) et `Map(source, target)`.
+
+### Resolution automatique dans MapFrom
+
+`MapFrom` resout automatiquement les mappings imbriques quand le type retourne differe du type cible :
+
+```csharp
+mapper.CreateMap<Inner, InnerDto>();
+mapper.CreateMap<Source, Target>()
+    .ForMember(d => d.Info, opt => opt.MapFrom(s => s.Data));
+    // Data est de type Inner, Info est de type InnerDto
+    // → le mapping Inner → InnerDto est applique automatiquement
+```
+
+Cela fonctionne aussi pour les collections et les types nullable, sans `ConvertUsing` explicite :
+
+```csharp
+// Collection : List<Inner> → List<InnerDto> via MapFrom
+mapper.CreateMap<Source, Target>()
+    .ForMember(d => d.Items, opt => opt.MapFrom(s => s.OriginalItems));
+
+// Nullable : int? → int via MapFrom
+mapper.CreateMap<Source, Target>()
+    .ForMember(d => d.Value, opt => opt.MapFrom(s => s.NullableValue));
+```
+
+### References circulaires
+
+NovelyMapper detecte et gere les references circulaires automatiquement, sans configuration :
+
+```csharp
+public class Customer
+{
+    public int Id { get; set; }
+    public Supplier? Supplier { get; set; }
+}
+public class Supplier
+{
+    public int Id { get; set; }
+    public Customer? Customer { get; set; }  // reference circulaire !
+}
+
+mapper.CreateMap<Customer, CustomerDto>();
+mapper.CreateMap<Supplier, SupplierDto>();
+
+// Aucun StackOverflowException
+var dto = mapper.Map<Customer, CustomerDto>(customer);
+```
+
+Comportement :
+- **A la compilation** : quand un cycle est detecte dans les types (ex: `Customer → Supplier → Customer`), le mapper emet un appel runtime `Map<S,T>()` au lieu de recurser infiniment dans l'Expression Tree
+- **Au runtime** : quand un meme objet source est rencontre une seconde fois dans le graphe (cycle dans les donnees), la back-reference retourne `null`
+- Les **arbres** (ex: `TreeNode` avec `Children: List<TreeNode>`) fonctionnent normalement tant qu'il n'y a pas de cycle dans les donnees
+
+### Mapping de collection via Map&lt;TTarget&gt;
+
+`Map<TTarget>(object)` detecte automatiquement les collections et infere le mapping element par element :
+
+```csharp
+mapper.CreateMap<Customer, CustomerDto>();
+
+var customers = db.Customers.ToList();
+
+// Infere automatiquement le mapping Customer → CustomerDto
+var dtos = mapper.Map<IEnumerable<CustomerDto>>(customers);
+var list = mapper.Map<List<CustomerDto>>(customers);
+var array = mapper.Map<CustomerDto[]>(customers);
+```
+
+Pas besoin d'enregistrer un mapping `List<Customer> → IEnumerable<CustomerDto>`. Le mapper detecte que `TTarget` est une collection, extrait les types elements, et route vers le mapping enregistre.
+
 ### ProjectTo (IQueryable)
 
 Projette un `IQueryable` vers un type cible en generant une `Expression<Func<S,T>>` traduisible en SQL par Entity Framework :
@@ -501,6 +602,7 @@ Interface principale pour l'injection de dependances.
 | Methode | Description |
 |---------|-------------|
 | `CreateMap<TSource, TTarget>()` | Enregistre un mapping et retourne la config |
+| `Map<TTarget>(object source)` | Mappe un objet (type infere au runtime). Supporte les collections |
 | `Map<TSource, TTarget>(source)` | Mappe un objet vers un nouveau TTarget |
 | `Map<TSource, TTarget>(source, target)` | Met a jour un TTarget existant |
 | `Map<TSource, TTarget>(IEnumerable)` | Mappe une collection (lazy) |
